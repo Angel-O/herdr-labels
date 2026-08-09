@@ -162,13 +162,18 @@ fn reconcile_tab(
             ..
         } if tab_id == &tab.tab_id
     );
-    let ambient_first_adoption = settings.auto_name_tabs
-        && ownership.is_none()
-        && is_placeholder(current_base)
-        && !matches!(
-            invocation,
-            Invocation::Preexec { .. } | Invocation::Precmd { .. }
-        );
+    let initial_adoption =
+        settings.auto_name_tabs && ownership.is_none() && is_placeholder(current_base);
+    let authoritative_initial_event = matches!(
+        invocation,
+        Invocation::Preexec {
+            program: Some(_),
+            ..
+        } | Invocation::Precmd { .. }
+    );
+    if initial_adoption && !authoritative_initial_event {
+        return Ok(());
+    }
     let eligible = if forced {
         true
     } else {
@@ -213,12 +218,12 @@ fn reconcile_tab(
             invocation,
             policy,
             fallback_shell,
-            ambient_first_adoption,
+            false,
         )?
     } else {
         None
     };
-    if ambient_first_adoption && computed_base.is_none() {
+    if initial_adoption && computed_base.is_none() {
         return Ok(());
     }
     let desired_base = computed_base.as_ref().map_or(current_base, |name| name);
