@@ -13,7 +13,7 @@ use crate::numbering::Tab;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-const SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
+const SOCKET_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Client for issuing tab requests to one Herdr session.
 ///

@@ -53,6 +53,17 @@ fn contender_can_claim_its_marker_after_holder_releases() {
     std::fs::remove_dir_all(state_dir).unwrap();
 }
 
+#[test]
+fn retry_sleep_does_not_exceed_the_remaining_admission_window() {
+    let now = Instant::now();
+
+    assert_eq!(
+        retry_delay(now + Duration::from_millis(7), now),
+        Some(Duration::from_millis(7))
+    );
+    assert_eq!(retry_delay(now, now), None);
+}
+
 fn test_state_dir() -> std::path::PathBuf {
     let id = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
     let path = std::env::temp_dir().join(format!(

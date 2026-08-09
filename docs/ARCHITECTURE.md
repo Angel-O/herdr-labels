@@ -35,7 +35,8 @@ for different reasons. Recovery actions can also bypass malformed user settings.
 ## Application Layer
 
 - `runner.rs` owns invocation timing, close settling, locking, exact-operation
-  serialization, and structural event coalescing.
+  serialization, structural event coalescing, and the total per-process pass
+  budget.
 - `reconciliation.rs` applies one coherent session observation to ownership and
   labels. It combines naming and numbering into one desired tab label and
   re-reads the tab before mutation.
@@ -52,7 +53,8 @@ Neither module talks to Herdr or the filesystem.
 
 ## Infrastructure
 
-- `herdr.rs` is the timeout-bounded socket client and protocol model.
+- `herdr.rs` is the one-second read/write-timeout socket client and protocol
+  model.
 - `state.rs` persists per-session ownership transitions atomically.
 - `lock.rs` provides OS-backed serialization and rerun signaling.
 - `filesystem.rs` owns shared absolute-path validation, private-directory

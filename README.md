@@ -273,8 +273,14 @@ scripts/test-install.sh
 ```
 
 Concurrent work uses an OS-backed per-session lock. Structural events coalesce
-into one final pass, while explicit shell transitions and actions retain their
-operation-specific meaning. State lives
+behind a single marker, and one process performs at most eight reconciliation
+passes across its initial work and final handoff. Shell transitions wait at most
+250 ms for admission; explicit actions retain their operation-specific meaning
+and use a two-second bound. A marker raised after the final budgeted snapshot is
+left for the next event instead of extending the current worker indefinitely.
+Close-event polling stops starting requests after a three-second deadline; an
+in-flight request can extend wall time, with one-second read and write limits
+after the OS establishes the local socket connection. State lives
 under `${XDG_STATE_HOME:-~/.local/state}/herdr-labels/`, partitioned by a stable
 hash of the Herdr socket path. Use a private, absolute `XDG_STATE_HOME`.
 

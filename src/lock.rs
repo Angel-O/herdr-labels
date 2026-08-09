@@ -8,8 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::filesystem::{ensure_private_directory, reject_symlink};
 
-const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
-const LOCK_RETRY_DELAY: Duration = Duration::from_millis(10);
+const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
 
 /// Exclusive reconciliation ownership held until this value is dropped.
 pub(crate) struct ReconciliationLock {
@@ -17,15 +16,9 @@ pub(crate) struct ReconciliationLock {
 }
 
 impl ReconciliationLock {
-    /// Acquires the plugin's reconciliation lock within the bounded wait.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the lock file cannot be opened, the operating
-    /// system rejects the lock, or another reconciliation holds it for longer
-    /// than the configured timeout.
+    #[cfg(test)]
     pub(crate) fn acquire(state_dir: &Path) -> io::Result<Self> {
-        Self::acquire_with_timeout(state_dir, LOCK_TIMEOUT)
+        Self::acquire_with_timeout(state_dir, Duration::from_secs(1))
     }
 
     /// Attempts to acquire reconciliation ownership without waiting.
@@ -78,8 +71,10 @@ impl ReconciliationLock {
         loop {
             match file.try_lock() {
                 Ok(()) => break,
-                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
-                    std::thread::sleep(LOCK_RETRY_DELAY);
+                Err(TryLockError::WouldBlock)
+                    if let Some(delay) = retry_delay(deadline, Instant::now()) =>
+                {
+                    std::thread::sleep(delay);
                 }
                 Err(TryLockError::WouldBlock) => {
                     return Err(io::Error::new(
@@ -92,6 +87,11 @@ impl ReconciliationLock {
         }
         Ok(Self { _file: file })
     }
+}
+
+fn retry_delay(deadline: Instant, now: Instant) -> Option<Duration> {
+    let remaining = deadline.saturating_duration_since(now);
+    (!remaining.is_zero()).then_some(LOCK_RETRY_DELAY.min(remaining))
 }
 
 fn open_lock_file(state_dir: &Path) -> io::Result<File> {
