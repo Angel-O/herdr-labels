@@ -1,0 +1,64 @@
+id = "angel-o.labels"
+name = "Labels"
+version = "0.1.0"
+min_herdr_version = "0.7.5"
+description = "Automatically name and number tabs while preserving manual labels."
+platforms = ["macos", "linux"]
+
+[[build]]
+command = ["sh", "scripts/install.sh"]
+
+[[startup]]
+command = ["target/release/herdr-labels"]
+
+[[events]]
+on = "tab.created"
+command = ["target/release/herdr-labels"]
+
+[[events]]
+on = "tab.closed"
+command = ["target/release/herdr-labels"]
+
+[[events]]
+on = "tab.moved"
+command = ["target/release/herdr-labels"]
+
+[[events]]
+on = "tab.renamed"
+command = ["target/release/herdr-labels"]
+
+[[events]]
+on = "pane.closed"
+command = ["target/release/herdr-labels"]
+
+[[events]]
+on = "tab.focused"
+command = ["target/release/herdr-labels"]
+
+[[events]]
+on = "pane.created"
+command = ["target/release/herdr-labels"]
+
+[[events]]
+on = "pane.exited"
+command = ["target/release/herdr-labels"]
+
+[[events]]
+on = "pane.focused"
+command = ["target/release/herdr-labels"]
+
+[[events]]
+on = "pane.moved"
+command = ["target/release/herdr-labels"]
+
+[[actions]]
+id = "reset"
+title = "Reset tab to automatic naming"
+contexts = ["global", "workspace", "pane"]
+command = ["target/release/herdr-labels", "reset"]
+
+[[actions]]
+id = "clear"
+title = "Clear generated labels"
+contexts = ["global"]
+command = ["target/release/herdr-labels", "clear"]

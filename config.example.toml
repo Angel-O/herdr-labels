@@ -1,0 +1,23 @@
+# Automatically name eligible tabs after their foreground process.
+auto_name_tabs = true
+
+# Prefix tab labels with their one-based position inside the workspace.
+number_tabs = true
+
+# When true, leave idle shell tabs with an empty base label. With numbering
+# enabled, an idle third tab is displayed as `[3]`.
+hide_idle_shell = false
+
+# Maximum Unicode characters in an automatically generated base name.
+max_label_chars = 24
+
+# Programs treated as interactive shells.
+shells = ["zsh", "bash", "sh", "dash", "ksh"]
+
+# Short-lived commands that keep the tab displaying its shell name.
+ignored_processes = ["ls", "cat", "pwd", "clear", "git", "direnv"]
+
+# Exact program-name replacements.
+[process_aliases]
+# bv = "beads_viewer"
+# cursor-agent = "cursor"
