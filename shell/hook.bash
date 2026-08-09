@@ -1,8 +1,13 @@
 # Herdr Labels shell integration. Source this file from an interactive bash.
 
-# Do nothing outside a Herdr pane, or when this shell already loaded the hook.
+# Do nothing outside a Herdr pane. Re-sourcing after a prompt framework loads
+# refreshes only the prompt registration; the initial claim still runs once.
 [[ ${HERDR_ENV:-} == 1 && -n ${HERDR_PANE_ID:-} && -n ${HERDR_TAB_ID:-} && -n ${HERDR_SOCKET_PATH:-} ]] || return 0
-[[ -z ${_HERDR_LABELS_BASH_HOOK_INSTALLED:-} ]] || return 0
+if [[ -n ${_HERDR_LABELS_BASH_HOOK_INSTALLED:-} ]] &&
+  declare -F _herdr_labels_bash_register_precmd >/dev/null; then
+  _herdr_labels_bash_register_precmd
+  return 0
+fi
 
 # Tests and custom installations can override the binary. Otherwise derive its
 # location from this hook so both linked and downloaded plugins are relocatable.
@@ -14,10 +19,19 @@ else
   unset _herdr_labels_bash_hook_dir
 fi
 
-# Run label updates in the background so commands and prompts never wait for
-# Herdr. All helper output is intentionally detached from the terminal.
+# Run command and prompt updates in the background so they never wait for Herdr.
+# The one-time initial claim below is synchronous to order it before preexec.
 _herdr_labels_bash_run() {
   "$_HERDR_LABELS_BASH_BIN" "$@" </dev/null >/dev/null 2>&1 &
+}
+
+_herdr_labels_bash_claim() {
+  local claim_pid
+  # Keep Bash's process group foreground for PID verification, but wait so no
+  # startup command can race ahead of the claim.
+  { "$_HERDR_LABELS_BASH_BIN" init --shell bash --shell-pid "$$" </dev/null >/dev/null 2>&1 & } 2>/dev/null
+  claim_pid=$!
+  wait "$claim_pid" || :
 }
 
 # Bash does not provide Zsh-style parsing here, so only accept a deliberately
@@ -44,13 +58,34 @@ _herdr_labels_bash_preexec() {
 # command executed while drawing the prompt.
 _herdr_labels_bash_precmd() {
   _herdr_labels_bash_run precmd --shell bash --shell-pid "$$"
-  _HERDR_LABELS_BASH_READY=1
+  if [[ -z ${_HERDR_LABELS_BASH_PREEXEC_ACTIVE:-} ]]; then
+    if [[ $(declare -p preexec_functions 2>/dev/null) == declare\ -a* ]]; then
+      _herdr_labels_bash_array_contains _herdr_labels_bash_preexec "${preexec_functions[@]}" ||
+        preexec_functions+=(_herdr_labels_bash_preexec)
+      _HERDR_LABELS_BASH_PREEXEC_MODE=array
+      _HERDR_LABELS_BASH_PREEXEC_ACTIVE=1
+    elif [[ -z $(trap -p DEBUG) ]]; then
+      _HERDR_LABELS_BASH_PREEXEC_MODE=debug
+      _HERDR_LABELS_BASH_PREEXEC_ACTIVE=1
+      _HERDR_LABELS_BASH_READY=1
+      trap 'if [[ ${_HERDR_LABELS_BASH_IN_DEBUG:-0} == 0 ]]; then _HERDR_LABELS_BASH_IN_DEBUG=1; _herdr_labels_bash_debug_trap "$BASH_COMMAND"; _HERDR_LABELS_BASH_IN_DEBUG=0; fi' DEBUG
+      return
+    else
+      _HERDR_LABELS_BASH_PREEXEC_MODE=none
+      _HERDR_LABELS_BASH_PREEXEC_ACTIVE=1
+    fi
+  fi
+  [[ ${_HERDR_LABELS_BASH_PREEXEC_MODE:-} == debug ]] && _HERDR_LABELS_BASH_READY=1
 }
 
 # Some Bash setups expose no preexec hook array. In that fallback, DEBUG fires
 # before many simple commands, so this gate forwards only the first event after
 # each prompt and remains closed until precmd rearms it.
 _herdr_labels_bash_debug_trap() {
+  local frame
+  for frame in "${FUNCNAME[@]:1}"; do
+    [[ $frame == _herdr_labels_bash_precmd ]] && return 0
+  done
   [[ ${_HERDR_LABELS_BASH_READY:-1} == 1 ]] || return 0
   _HERDR_LABELS_BASH_READY=0
   _herdr_labels_bash_preexec "${1-}"
@@ -67,36 +102,23 @@ _herdr_labels_bash_array_contains() {
   return 1
 }
 
-# Prefer the de facto preexec_functions API when another framework provides it.
-# Install a DEBUG trap only when no framework and no existing DEBUG trap exist;
-# an existing trap belongs to the user and must not be replaced.
-if [[ $(declare -p preexec_functions 2>/dev/null) == declare\ -a* ]]; then
-  _herdr_labels_bash_array_contains _herdr_labels_bash_preexec "${preexec_functions[@]}" ||
-    preexec_functions+=(_herdr_labels_bash_preexec)
-elif [[ -z $(trap -p DEBUG) ]]; then
-  _HERDR_LABELS_BASH_INSTALL_DEBUG=1
-fi
+_herdr_labels_bash_register_precmd() {
+  # Bash versions and prompt frameworks represent PROMPT_COMMAND as either an
+  # array or a semicolon-separated string. Preserve either form and append ours.
+  if [[ $(declare -p precmd_functions 2>/dev/null) == declare\ -a* ]]; then
+    _herdr_labels_bash_array_contains _herdr_labels_bash_precmd "${precmd_functions[@]}" ||
+      precmd_functions+=(_herdr_labels_bash_precmd)
+  elif [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == declare\ -a* ]]; then
+    _herdr_labels_bash_array_contains _herdr_labels_bash_precmd "${PROMPT_COMMAND[@]}" ||
+      PROMPT_COMMAND+=(_herdr_labels_bash_precmd)
+  else
+    case ";${PROMPT_COMMAND:-};" in
+      *';_herdr_labels_bash_precmd;'*) ;;
+      *) PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}_herdr_labels_bash_precmd" ;;
+    esac
+  fi
+}
 
-# Bash versions and prompt frameworks represent PROMPT_COMMAND as either an
-# array or a semicolon-separated string. Preserve either form and append ours.
-if [[ $(declare -p precmd_functions 2>/dev/null) == declare\ -a* ]]; then
-  _herdr_labels_bash_array_contains _herdr_labels_bash_precmd "${precmd_functions[@]}" ||
-    precmd_functions+=(_herdr_labels_bash_precmd)
-elif [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == declare\ -a* ]]; then
-  _herdr_labels_bash_array_contains _herdr_labels_bash_precmd "${PROMPT_COMMAND[@]}" ||
-    PROMPT_COMMAND+=(_herdr_labels_bash_precmd)
-else
-  case ";${PROMPT_COMMAND:-};" in
-    *';_herdr_labels_bash_precmd;'*) ;;
-    *) PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}_herdr_labels_bash_precmd" ;;
-  esac
-fi
-
-# Install DEBUG last because setup commands themselves would otherwise trigger
-# it. The IN_DEBUG guard prevents commands inside the trap from recursing.
 _HERDR_LABELS_BASH_HOOK_INSTALLED=1
-if [[ ${_HERDR_LABELS_BASH_INSTALL_DEBUG:-} == 1 ]]; then
-  unset _HERDR_LABELS_BASH_INSTALL_DEBUG
-  _HERDR_LABELS_BASH_READY=0
-  trap 'if [[ ${_HERDR_LABELS_BASH_IN_DEBUG:-0} == 0 ]]; then _HERDR_LABELS_BASH_IN_DEBUG=1; _herdr_labels_bash_debug_trap "$BASH_COMMAND"; _HERDR_LABELS_BASH_IN_DEBUG=0; fi' DEBUG
-fi
+_herdr_labels_bash_claim
+_herdr_labels_bash_register_precmd

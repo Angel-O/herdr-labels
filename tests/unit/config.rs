@@ -23,6 +23,21 @@ fn shell_modes_require_only_safe_arguments() {
     );
     assert_eq!(
         invocation_from(
+            &strings(&["init", "--shell", "zsh", "--shell-pid", "41"]),
+            None,
+            Some("w1".into()),
+            Some("w1:t1".into()),
+            Some("w1:p1".into())
+        )
+        .unwrap(),
+        Invocation::Init {
+            pane_id: "w1:p1".into(),
+            shell: "zsh".into(),
+            shell_pid: 41,
+        }
+    );
+    assert_eq!(
+        invocation_from(
             &strings(&["precmd", "--shell", "bash", "--shell-pid", "42"]),
             None,
             Some("w1".into()),

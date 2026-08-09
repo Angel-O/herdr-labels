@@ -15,10 +15,21 @@ else
   unset _herdr_labels_zsh_hook_file _herdr_labels_zsh_hook_dir
 fi
 
-# Run label updates away from the foreground so commands and prompts never wait
-# for Herdr. Zsh's &! also disowns the job and suppresses job-status messages.
+# Run command and prompt updates away from the foreground so they never wait for
+# Herdr. The one-time initial claim below is synchronous to order it before
+# preexec. Zsh's &! disowns later jobs and suppresses job-status messages.
 _herdr_labels_zsh_run() {
   "$_HERDR_LABELS_ZSH_BIN" "$@" </dev/null >/dev/null 2>&1 &!
+}
+
+_herdr_labels_zsh_claim() {
+  local claim_pid
+  # Local job-control suppression keeps Zsh's process group foreground for PID
+  # verification without printing background-job start or completion notices.
+  setopt localoptions nomonitor
+  "$_HERDR_LABELS_ZSH_BIN" init --shell zsh --shell-pid "$$" </dev/null >/dev/null 2>&1 &
+  claim_pid=$!
+  wait "$claim_pid" || :
 }
 
 # Zsh supplies the complete command line before execution. Its ${(z)...}
@@ -44,12 +55,16 @@ _herdr_labels_zsh_preexec() {
 
 # Returning to the prompt means the interactive shell is foreground again.
 _herdr_labels_zsh_precmd() {
+  if [[ -z ${_HERDR_LABELS_ZSH_PREEXEC_ACTIVE:-} ]]; then
+    add-zsh-hook preexec _herdr_labels_zsh_preexec
+    typeset -g _HERDR_LABELS_ZSH_PREEXEC_ACTIVE=1
+  fi
   _herdr_labels_zsh_run precmd --shell zsh --shell-pid "$$"
 }
 
 # Register through Zsh's hook API instead of replacing another integration's
 # preexec or precmd handlers.
 autoload -Uz add-zsh-hook
-add-zsh-hook preexec _herdr_labels_zsh_preexec
-add-zsh-hook precmd _herdr_labels_zsh_precmd
 typeset -g _HERDR_LABELS_ZSH_HOOK_INSTALLED=1
+_herdr_labels_zsh_claim
+add-zsh-hook precmd _herdr_labels_zsh_precmd

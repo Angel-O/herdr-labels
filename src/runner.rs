@@ -14,6 +14,7 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 const CLOSE_RETRIES: usize = 60;
 const CLOSE_RETRY_DELAY: Duration = Duration::from_millis(50);
+const INIT_LOCK_TIMEOUT: Duration = Duration::from_millis(100);
 const SAMPLE_DELAY: Duration = Duration::from_millis(200);
 const PROGRAM_SETTLE_DELAYS: [Duration; 5] = [
     Duration::from_millis(25),
@@ -56,6 +57,18 @@ pub(crate) fn run(config: Config) -> Result<()> {
         if ReconciliationLock::take_rerun(&config.state_dir)? {
             run_coalesced_passes(&config, &Invocation::Full, &mut client)?;
         }
+        drop(lock);
+        return handoff_after_release(&config, &mut client);
+    }
+
+    if matches!(config.invocation, Invocation::Init { .. }) {
+        let lock =
+            match ReconciliationLock::acquire_with_timeout(&config.state_dir, INIT_LOCK_TIMEOUT) {
+                Ok(lock) => lock,
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => return Ok(()),
+                Err(error) => return Err(error.into()),
+            };
+        run_pass(&config, &config.invocation, &mut client)?;
         drop(lock);
         return handoff_after_release(&config, &mut client);
     }

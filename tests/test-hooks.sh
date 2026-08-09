@@ -14,7 +14,9 @@ make_stub() {
   stub=$1
   cat >"$stub" <<'EOF'
 #!/bin/sh
+[ -z "${HERDR_LABELS_TEST_DELAY:-}" ] || sleep "$HERDR_LABELS_TEST_DELAY"
 printf '%s\n' "$*" >>"$HERDR_LABELS_TEST_LOG"
+exit "${HERDR_LABELS_TEST_STATUS:-0}"
 EOF
   chmod +x "$stub"
 }
@@ -59,6 +61,8 @@ run_shell_test() {
       precmd_functions=()
       . "$1"
       . "$1"
+      [ "${#preexec_functions[@]}" -eq 0 ] || exit 8
+      _herdr_labels_'"$shell_name"'_precmd
       preexec_count=0
       precmd_count=0
       for hook_function in "${preexec_functions[@]}"; do
@@ -74,14 +78,14 @@ run_shell_test() {
       _herdr_labels_'"$shell_name"'_preexec "herdr_test_function argument"
       _herdr_labels_'"$shell_name"'_preexec "if true; then :; fi"
       _herdr_labels_'"$shell_name"'_preexec "missing-herdr-command argument"
-      _herdr_labels_'"$shell_name"'_precmd
       wait
     ' hooks "$hook"
 
-  wait_for_lines "$log" 6
-  [ "$(wc -l <"$log" | tr -d ' ')" -eq 6 ] || fail "$shell_name emitted an unexpected number of calls"
+  wait_for_lines "$log" 7
+  [ "$(wc -l <"$log" | tr -d ' ')" -eq 7 ] || fail "$shell_name emitted an unexpected number of calls"
   [ "$(grep -Fxc "preexec --shell $shell_name --program /bin/echo" "$log")" -eq 1 ] || fail "$shell_name external command classification failed"
   [ "$(grep -Fxc "preexec --shell $shell_name --sample" "$log")" -eq 4 ] || fail "$shell_name sample classification failed"
+  [ "$(grep -Ec "^init --shell $shell_name --shell-pid [0-9]+$" "$log")" -eq 1 ] || fail "$shell_name eager hook failed"
   [ "$(grep -Ec "^precmd --shell $shell_name --shell-pid [0-9]+$" "$log")" -eq 1 ] || fail "$shell_name prompt hook failed"
 
   : >"$log"
@@ -89,8 +93,26 @@ run_shell_test() {
     HERDR_ENV=1 HERDR_PANE_ID=pane HERDR_TAB_ID=tab HERDR_SOCKET_PATH=socket \
     HERDR_LABELS_BIN="$tmp/override/herdr-labels" HERDR_LABELS_TEST_LOG="$log" \
     "$shell_bin" -c 'preexec_functions=(); precmd_functions=(); . "$1"; _herdr_labels_'"$shell_name"'_precmd; wait' hooks "$root/shell/hook.$shell_name"
+  wait_for_lines "$log" 2
+  [ "$(grep -Ec "^(init|precmd) --shell $shell_name --shell-pid [0-9]+$" "$log")" -eq 2 ] || fail "$shell_name binary override failed"
+}
+
+test_eager_claim() {
+  shell_name=$1
+  shell_bin=$2
+  log=$tmp/$shell_name-eager.log
+  : >"$log"
+
+  env -u BASH_ENV -u ENV -u ZDOTDIR \
+    HOME="$tmp/home" ZDOTDIR="$tmp/zdot" \
+    HERDR_ENV=1 HERDR_PANE_ID=pane HERDR_TAB_ID=tab HERDR_SOCKET_PATH=socket \
+    HERDR_LABELS_BIN="$tmp/override/herdr-labels" HERDR_LABELS_TEST_LOG="$log" \
+    HERDR_LABELS_TEST_DELAY=0.05 \
+    "$shell_bin" -c '. "$1"; [ -s "$HERDR_LABELS_TEST_LOG" ]; . "$1"' hooks "$root/shell/hook.$shell_name"
+
   wait_for_lines "$log" 1
-  [ "$(grep -Ec "^precmd --shell $shell_name --shell-pid [0-9]+$" "$log")" -eq 1 ] || fail "$shell_name binary override failed"
+  [ "$(wc -l <"$log" | tr -d ' ')" -eq 1 ] || fail "$shell_name eager claim was not emitted exactly once"
+  [ "$(grep -Ec "^init --shell $shell_name --shell-pid [0-9]+$" "$log")" -eq 1 ] || fail "$shell_name eager claim was invalid"
 }
 
 test_bash_debug_fallback() {
@@ -104,12 +126,82 @@ test_bash_debug_fallback() {
       unset preexec_functions precmd_functions
       PROMPT_COMMAND=":"
       . "$1"
+      [ -z "$(trap -p DEBUG)" ]
       eval "$PROMPT_COMMAND"
       /bin/echo user-command >/dev/null
       wait
     ' hooks "$root/shell/hook.bash"
   [ "$(grep -Fxc 'preexec --shell bash --program /bin/echo' "$log")" -eq 1 ] || fail "bash DEBUG fallback emitted more than one preexec per prompt"
-  [ "$(grep -Ec '^precmd --shell bash --shell-pid [0-9]+$' "$log")" -eq 1 ] || fail "bash DEBUG fallback missed precmd"
+  [ "$(grep -Ec '^init --shell bash --shell-pid [0-9]+$' "$log")" -eq 1 ] || fail "bash DEBUG fallback missed eager update"
+  [ "$(grep -Ec '^precmd --shell bash --shell-pid [0-9]+$' "$log")" -eq 1 ] || fail "bash DEBUG fallback missed prompt update"
+}
+
+test_bash_late_preexec_array() {
+  log=$tmp/bash-late-array.log
+  : >"$log"
+  env -u BASH_ENV -u ENV -u HERDR_LABELS_BIN \
+    HOME="$tmp/home" ZDOTDIR="$tmp/zdot" \
+    HERDR_ENV=1 HERDR_PANE_ID=pane HERDR_TAB_ID=tab HERDR_SOCKET_PATH=socket \
+    HERDR_LABELS_TEST_LOG="$log" HERDR_LABELS_BIN="$tmp/override/herdr-labels" \
+    bash -c '
+      unset preexec_functions precmd_functions
+      . "$1"
+      [ -z "$(trap -p DEBUG)" ]
+      preexec_functions=()
+      _herdr_labels_bash_precmd
+      [ "${preexec_functions[0]-}" = _herdr_labels_bash_preexec ]
+      [ -z "$(trap -p DEBUG)" ]
+      wait
+    ' hooks "$root/shell/hook.bash"
+}
+
+test_bash_prompt_registration_refresh() {
+  log=$tmp/bash-registration-refresh.log
+  : >"$log"
+  env -u BASH_ENV -u ENV -u HERDR_LABELS_BIN \
+    HOME="$tmp/home" ZDOTDIR="$tmp/zdot" \
+    HERDR_ENV=1 HERDR_PANE_ID=pane HERDR_TAB_ID=tab HERDR_SOCKET_PATH=socket \
+    HERDR_LABELS_TEST_LOG="$log" HERDR_LABELS_BIN="$tmp/override/herdr-labels" \
+    bash -c '
+      unset preexec_functions precmd_functions
+      PROMPT_COMMAND=before
+      . "$1"
+      PROMPT_COMMAND=framework
+      . "$1"
+      [ "$PROMPT_COMMAND" = "framework;_herdr_labels_bash_precmd" ]
+      wait
+    ' hooks "$root/shell/hook.bash"
+  [ "$(grep -Ec '^init --shell bash --shell-pid [0-9]+$' "$log")" -eq 1 ] || fail "bash registration refresh repeated eager update"
+}
+
+test_bash_old_marker_upgrade() {
+  log=$tmp/bash-old-marker.log
+  : >"$log"
+  env -u BASH_ENV -u ENV -u HERDR_LABELS_BIN \
+    HOME="$tmp/home" ZDOTDIR="$tmp/zdot" \
+    HERDR_ENV=1 HERDR_PANE_ID=pane HERDR_TAB_ID=tab HERDR_SOCKET_PATH=socket \
+    HERDR_LABELS_TEST_LOG="$log" HERDR_LABELS_BIN="$tmp/override/herdr-labels" \
+    bash -c '
+      _HERDR_LABELS_BASH_HOOK_INSTALLED=1
+      . "$1"
+      declare -F _herdr_labels_bash_register_precmd >/dev/null
+      wait
+    ' hooks "$root/shell/hook.bash"
+  [ "$(grep -Ec '^init --shell bash --shell-pid [0-9]+$' "$log")" -eq 1 ] || fail "bash old marker blocked hook upgrade"
+}
+
+test_failed_claim_is_nonfatal() {
+  shell_name=$1
+  shell_bin=$2
+  log=$tmp/$shell_name-failed-claim.log
+  : >"$log"
+
+  env -u BASH_ENV -u ENV -u ZDOTDIR \
+    HOME="$tmp/home" ZDOTDIR="$tmp/zdot" \
+    HERDR_ENV=1 HERDR_PANE_ID=pane HERDR_TAB_ID=tab HERDR_SOCKET_PATH=socket \
+    HERDR_LABELS_BIN="$tmp/override/herdr-labels" HERDR_LABELS_TEST_LOG="$log" \
+    HERDR_LABELS_TEST_STATUS=2 \
+    "$shell_bin" -c 'set -e; . "$1"; :' hooks "$root/shell/hook.$shell_name"
 }
 
 test_zsh_job_notifications() {
@@ -118,6 +210,7 @@ test_zsh_job_notifications() {
       HOME="$tmp/home" ZDOTDIR="$tmp/zdot" \
       HERDR_ENV=1 HERDR_PANE_ID=pane HERDR_TAB_ID=tab HERDR_SOCKET_PATH=socket \
       HERDR_LABELS_BIN="$tmp/override/herdr-labels" HERDR_LABELS_TEST_LOG="$tmp/zsh-jobs.log" \
+      HERDR_LABELS_TEST_DELAY=0.05 \
       zsh -fic '. "$1"; _herdr_labels_zsh_run test; sleep 0.1' hooks "$root/shell/hook.zsh" 2>&1
   )
   [ -z "$output" ] || fail "zsh exposed background job notifications"
@@ -128,7 +221,14 @@ command -v bash >/dev/null 2>&1 || fail 'bash is required'
 
 run_shell_test zsh zsh "$tmp/default/shell/hook.zsh"
 run_shell_test bash bash "$tmp/default/shell/hook.bash"
+test_eager_claim zsh zsh
+test_eager_claim bash bash
+test_failed_claim_is_nonfatal zsh zsh
+test_failed_claim_is_nonfatal bash bash
 test_bash_debug_fallback
+test_bash_late_preexec_array
+test_bash_prompt_registration_refresh
+test_bash_old_marker_upgrade
 test_zsh_job_notifications
 
 printf 'hook tests passed\n'

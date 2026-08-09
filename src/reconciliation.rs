@@ -166,12 +166,24 @@ fn reconcile_tab(
         settings.auto_name_tabs && ownership.is_none() && is_placeholder(current_base);
     let authoritative_initial_event = matches!(
         invocation,
-        Invocation::Preexec {
-            program: Some(_),
-            ..
-        } | Invocation::Precmd { .. }
+        Invocation::Init { .. }
+            | Invocation::Preexec {
+                program: Some(_),
+                ..
+            }
+            | Invocation::Precmd { .. }
     );
     if initial_adoption && !authoritative_initial_event {
+        return Ok(());
+    }
+    if matches!(
+        ownership.as_ref(),
+        Some(TabOwnership::Owned {
+            last_base,
+            last_rendered,
+        }) if current_base != last_base || &tab.label != last_rendered
+    ) {
+        state.set_ownership(&tab.tab_id, TabOwnership::Manual);
         return Ok(());
     }
     let eligible = if forced {
@@ -189,11 +201,7 @@ fn reconcile_tab(
             }
             Some(TabOwnership::AutomaticDisabled) => false,
             Some(TabOwnership::ResetPending) => true,
-            Some(TabOwnership::Owned { last_base, .. }) if current_base == last_base => true,
-            Some(TabOwnership::Owned { .. }) => {
-                state.set_ownership(&tab.tab_id, TabOwnership::Manual);
-                false
-            }
+            Some(TabOwnership::Owned { .. }) => true,
             Some(TabOwnership::PendingRename { .. }) => false,
             None if is_placeholder(current_base) => true,
             None => {
@@ -210,7 +218,19 @@ fn reconcile_tab(
             Some(TabOwnership::Owned { last_rendered, .. })
         ) if tab_id == &tab.tab_id && last_rendered == &tab.label
     );
-    let computed_base = if settings.auto_name_tabs && eligible && !own_rename_event {
+    let observes_process = matches!(
+        invocation,
+        Invocation::Init { .. }
+            | Invocation::Preexec { .. }
+            | Invocation::Precmd { .. }
+            | Invocation::Reset { .. }
+            | Invocation::Toggle { .. }
+    ) || renamed_to_whitespace;
+    let computed_base = if settings.auto_name_tabs
+        && eligible
+        && (observes_process || matches!(ownership, Some(TabOwnership::ResetPending)))
+        && !own_rename_event
+    {
         computed_name(
             client,
             snapshot,
@@ -226,13 +246,24 @@ fn reconcile_tab(
     if initial_adoption && computed_base.is_none() {
         return Ok(());
     }
-    let desired_base = computed_base.as_ref().map_or(current_base, |name| name);
+    let owned_base = if eligible {
+        match ownership.as_ref() {
+            Some(TabOwnership::Owned { last_base, .. }) => Some(last_base.as_str()),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let desired_base = computed_base
+        .as_deref()
+        .or(owned_base)
+        .unwrap_or(current_base);
     let desired = if settings.number_tabs {
         numbered_label(position, desired_base)
     } else {
         desired_base.to_owned()
     };
-    let plugin_owned = eligible && computed_base.is_some();
+    let plugin_owned = eligible && (computed_base.is_some() || owned_base.is_some());
 
     if desired != tab.label {
         if plugin_owned {
@@ -319,7 +350,12 @@ fn computed_name(
                     .unwrap_or_default(),
             ))
         }
-        Invocation::Precmd {
+        Invocation::Init {
+            pane_id,
+            shell,
+            shell_pid,
+        }
+        | Invocation::Precmd {
             pane_id,
             shell,
             shell_pid,
@@ -433,7 +469,9 @@ fn naming_pane<'a>(snapshot: &'a SessionSnapshot, tab: &SessionTab) -> Option<&'
 }
 
 fn scoped_tabs<'a>(snapshot: &'a SessionSnapshot, invocation: &Invocation) -> Vec<&'a SessionTab> {
-    if let Invocation::Preexec { pane_id, .. } | Invocation::Precmd { pane_id, .. } = invocation
+    if let Invocation::Init { pane_id, .. }
+    | Invocation::Preexec { pane_id, .. }
+    | Invocation::Precmd { pane_id, .. } = invocation
         && !snapshot.panes.iter().any(|pane| pane.pane_id == *pane_id)
     {
         return Vec::new();
@@ -452,7 +490,9 @@ fn scoped_tabs<'a>(snapshot: &'a SessionSnapshot, invocation: &Invocation) -> Ve
             workspace_id,
             tab_id,
         } => (Some(workspace_id.as_str()), Some(tab_id.as_str())),
-        Invocation::Preexec { pane_id, .. } | Invocation::Precmd { pane_id, .. } => (
+        Invocation::Init { pane_id, .. }
+        | Invocation::Preexec { pane_id, .. }
+        | Invocation::Precmd { pane_id, .. } => (
             None,
             snapshot
                 .panes

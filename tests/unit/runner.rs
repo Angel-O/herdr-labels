@@ -184,6 +184,15 @@ fn contended_own_rename_is_not_promoted_to_a_full_pass() {
     );
 
     assert!(is_owned_rename_event(&config, &mut client).unwrap());
+    state.set_ownership(
+        "w1:t1",
+        TabOwnership::Owned {
+            last_base: "nvim".into(),
+            last_rendered: "[1] nvim".into(),
+        },
+    );
+    state.persist().unwrap();
+    assert!(is_owned_rename_event(&config, &mut client).unwrap());
     state.set_ownership("w1:t1", TabOwnership::Manual);
     state.persist().unwrap();
     assert!(!is_owned_rename_event(&config, &mut client).unwrap());
@@ -200,6 +209,25 @@ fn coalescing_consumes_a_rerun_requested_during_the_first_pass() {
 
     assert_eq!(client.snapshots, 2);
     assert!(!ReconciliationLock::rerun_requested(&directory.0).unwrap());
+}
+
+#[test]
+fn contended_init_times_out_without_requesting_a_generic_rerun() {
+    let directory = TestDir::new();
+    let _lock = ReconciliationLock::acquire(&directory.0).unwrap();
+    let config = config(
+        &directory,
+        Invocation::Init {
+            pane_id: "w1:t1:pane".into(),
+            shell: "zsh".into(),
+            shell_pid: 7,
+        },
+    );
+
+    run(config).unwrap();
+
+    assert!(!ReconciliationLock::rerun_requested(&directory.0).unwrap());
+    assert!(INIT_LOCK_TIMEOUT < Duration::from_secs(1));
 }
 
 #[test]

@@ -46,6 +46,11 @@ pub(crate) enum Invocation {
         shell: String,
         program: Option<String>,
     },
+    Init {
+        pane_id: String,
+        shell: String,
+        shell_pid: u32,
+    },
     Precmd {
         pane_id: String,
         shell: String,
@@ -149,6 +154,17 @@ fn invocation_from(
                 pane_id: required_value(PANE_ID_ENV, pane_id)?,
                 shell: shell.clone(),
                 program: Some(program.clone()),
+            });
+        }
+        [mode, shell_flag, shell, pid_flag, shell_pid]
+            if mode == "init" && shell_flag == "--shell" && pid_flag == "--shell-pid" =>
+        {
+            return Ok(Invocation::Init {
+                pane_id: required_value(PANE_ID_ENV, pane_id)?,
+                shell: shell.clone(),
+                shell_pid: shell_pid
+                    .parse()
+                    .map_err(|_| io::Error::other("--shell-pid must be an unsigned integer"))?,
             });
         }
         [mode, shell_flag, shell, pid_flag, shell_pid]
