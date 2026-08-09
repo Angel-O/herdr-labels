@@ -22,16 +22,26 @@ fi
 # Run command and prompt updates in the background so they never wait for Herdr.
 # The one-time initial claim below is synchronous to order it before preexec.
 _herdr_labels_bash_run() {
-  "$_HERDR_LABELS_BASH_BIN" "$@" </dev/null >/dev/null 2>&1 &
+  local update_pid
+  { "$_HERDR_LABELS_BASH_BIN" "$@" </dev/null >/dev/null 2>&1 & } 2>/dev/null
+  update_pid=$!
+  if [[ $- == *m* ]]; then
+    disown "$update_pid" 2>/dev/null || :
+  fi
 }
 
 _herdr_labels_bash_claim() {
-  local claim_pid
+  local claim_pid monitor_enabled=
   # Keep Bash's process group foreground for PID verification, but wait so no
   # startup command can race ahead of the claim.
+  if [[ $- == *m* ]]; then
+    monitor_enabled=1
+    set +m
+  fi
   { "$_HERDR_LABELS_BASH_BIN" init --shell bash --shell-pid "$$" </dev/null >/dev/null 2>&1 & } 2>/dev/null
   claim_pid=$!
   wait "$claim_pid" || :
+  [[ -z $monitor_enabled ]] || set -m
 }
 
 # Bash does not provide Zsh-style parsing here, so only accept a deliberately

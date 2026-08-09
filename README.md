@@ -8,6 +8,25 @@ one-based position, such as `[1] zsh`, `[2] nvim`, and `[3] tests`.
 
 ![Automatic process-aware tab naming and numbering](assets/demo.gif)
 
+## Important: Allow automatic naming
+
+> [!IMPORTANT]
+> When Herdr asks you to name a newly created tab, press **Enter without typing
+> a name**. Herdr Labels treats any non-empty name as a manual label and
+> deliberately preserves it, so commands will not automatically rename that
+> tab.
+
+Alternatively, disable the new-tab naming prompt in Herdr's
+`~/.config/herdr/config.toml`:
+
+```toml
+[ui]
+prompt_new_tab_name = false
+```
+
+If your config already has an `[ui]` section, add the setting to that existing
+section rather than creating another one.
+
 ## Motivation
 
 Herdr's default tab labels make tab numbers visible when tabs use the default
