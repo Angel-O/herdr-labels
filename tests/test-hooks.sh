@@ -216,6 +216,25 @@ test_zsh_job_notifications() {
   [ -z "$output" ] || fail "zsh exposed background job notifications"
 }
 
+test_bash_job_notifications() {
+  log=$tmp/bash-jobs.log
+  : >"$log"
+  env -u BASH_ENV -u ENV -u ZDOTDIR \
+    HOME="$tmp/home" ZDOTDIR="$tmp/zdot" \
+    HERDR_ENV=1 HERDR_PANE_ID=pane HERDR_TAB_ID=tab HERDR_SOCKET_PATH=socket \
+    HERDR_LABELS_BIN="$tmp/override/herdr-labels" HERDR_LABELS_TEST_LOG="$log" \
+    HERDR_LABELS_TEST_DELAY=0.05 \
+    bash -c '
+      set -m
+      . "$1"
+      [[ $- == *m* ]] || exit 10
+      [ -z "$(jobs -p)" ] || exit 11
+      _herdr_labels_bash_run test
+      [ -z "$(jobs -p)" ] || exit 12
+      sleep 0.1
+    ' hooks "$root/shell/hook.bash"
+}
+
 command -v zsh >/dev/null 2>&1 || fail 'zsh is required'
 command -v bash >/dev/null 2>&1 || fail 'bash is required'
 
@@ -229,6 +248,7 @@ test_bash_debug_fallback
 test_bash_late_preexec_array
 test_bash_prompt_registration_refresh
 test_bash_old_marker_upgrade
+test_bash_job_notifications
 test_zsh_job_notifications
 
 printf 'hook tests passed\n'
