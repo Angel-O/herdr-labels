@@ -20,6 +20,8 @@ static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 pub(crate) enum TabOwnership {
     /// The label belongs to the user and must not be rewritten automatically.
     Manual,
+    /// Automatic naming was explicitly disabled while preserving the current label.
+    AutomaticDisabled,
     /// The user requested re-adoption, but a usable process name is not available yet.
     ResetPending,
     /// The label was last rendered by the plugin from `last_base`.

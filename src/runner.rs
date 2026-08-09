@@ -96,6 +96,7 @@ fn is_exact(invocation: &Invocation) -> bool {
         invocation,
         Invocation::Clear
             | Invocation::Reset { .. }
+            | Invocation::Toggle { .. }
             | Invocation::Preexec { .. }
             | Invocation::Precmd { .. }
     )

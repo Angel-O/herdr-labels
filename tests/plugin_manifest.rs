@@ -36,9 +36,11 @@ fn naming_lifecycle_events_are_subscribed() {
 }
 
 #[test]
-fn reset_and_clear_actions_are_declared() {
+fn naming_actions_are_declared() {
     assert!(MANIFEST.contains("id = \"reset\""));
+    assert!(MANIFEST.contains("id = \"toggle\""));
     assert!(MANIFEST.contains("id = \"clear\""));
     assert!(MANIFEST.contains("[\"target/release/herdr-labels\", \"reset\"]"));
+    assert!(MANIFEST.contains("[\"target/release/herdr-labels\", \"toggle\"]"));
     assert!(MANIFEST.contains("[\"target/release/herdr-labels\", \"clear\"]"));
 }

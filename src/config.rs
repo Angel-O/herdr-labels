@@ -55,6 +55,10 @@ pub(crate) enum Invocation {
         workspace_id: Option<String>,
         tab_id: Option<String>,
     },
+    Toggle {
+        workspace_id: Option<String>,
+        tab_id: Option<String>,
+    },
     Clear,
 }
 
@@ -119,6 +123,12 @@ fn invocation_from(
         [mode] if mode == "clear" => return Ok(Invocation::Clear),
         [mode] if mode == "reset" => {
             return Ok(Invocation::Reset {
+                workspace_id,
+                tab_id,
+            });
+        }
+        [mode] if mode == "toggle" => {
+            return Ok(Invocation::Toggle {
                 workspace_id,
                 tab_id,
             });

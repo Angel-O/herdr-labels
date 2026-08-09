@@ -58,6 +58,7 @@ fn all_fields_and_ownership_variants_round_trip() {
     let mut state = State::load(&session_dir).unwrap();
     state.set_suspended(true);
     state.set_ownership("manual", TabOwnership::Manual);
+    state.set_ownership("disabled", TabOwnership::AutomaticDisabled);
     state.set_ownership(
         "owned",
         TabOwnership::Owned {
@@ -72,6 +73,10 @@ fn all_fields_and_ownership_variants_round_trip() {
 
     assert!(loaded.is_suspended());
     assert_eq!(loaded.ownership("manual"), Some(&TabOwnership::Manual));
+    assert_eq!(
+        loaded.ownership("disabled"),
+        Some(&TabOwnership::AutomaticDisabled)
+    );
     assert_eq!(
         loaded.ownership("owned"),
         Some(&TabOwnership::Owned {
