@@ -118,15 +118,24 @@ label, such as a single space. A completely empty field cancels Herdr's rename;
 a whitespace-only label is submitted and tells Herdr Labels to resume automatic
 naming.
 
-To bind reset to `prefix+option+r` on macOS (`prefix+alt+r` in Herdr's key
-syntax), add this to `~/.config/herdr/config.toml`:
+Toggle automatic naming for the current tab:
+
+```bash
+herdr plugin action invoke toggle --plugin angel-o.labels
+```
+
+Turning automatic naming off preserves the current name while numbering
+continues. Toggling again re-adopts the foreground process.
+
+To bind this toggle to `prefix+option+r` on macOS (`prefix+alt+r` in Herdr's
+key syntax), add this to `~/.config/herdr/config.toml`:
 
 ```toml
 [[keys.command]]
 key = "prefix+alt+r"
 type = "plugin_action"
-command = "angel-o.labels.reset"
-description = "reset tab to automatic naming"
+command = "angel-o.labels.toggle"
+description = "toggle automatic tab naming"
 ```
 
 Reload the configuration after editing it:

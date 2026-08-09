@@ -497,6 +497,162 @@ fn reset_reclaims_a_manual_tab() {
 }
 
 #[test]
+fn toggle_disables_automatic_naming_without_changing_the_label() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: "nvim".into(),
+            last_rendered: "[1] nvim".into(),
+        },
+    );
+    let mut client = FakeClient::new(
+        snapshot(vec![tab("w1:t1", "w1", "[1] nvim", false)]),
+        &[("w1:t1:pane", "cargo")],
+    );
+    let config = config(
+        &directory,
+        Invocation::Toggle {
+            workspace_id: Some("w1".into()),
+            tab_id: Some("w1:t1".into()),
+        },
+    );
+
+    run_pass(&config, &config.invocation, &mut client).unwrap();
+
+    assert!(client.renamed.is_empty());
+    assert_eq!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(&TabOwnership::AutomaticDisabled)
+    );
+}
+
+#[test]
+fn toggle_reenables_automatic_naming_for_a_manual_tab() {
+    let directory = TestDir::new();
+    set_ownership(&directory, TabOwnership::Manual);
+    let mut client = FakeClient::new(
+        snapshot(vec![tab("w1:t1", "w1", "[1] tests", false)]),
+        &[("w1:t1:pane", "cargo")],
+    );
+    let config = config(
+        &directory,
+        Invocation::Toggle {
+            workspace_id: Some("w1".into()),
+            tab_id: Some("w1:t1".into()),
+        },
+    );
+
+    run_pass(&config, &config.invocation, &mut client).unwrap();
+
+    assert_eq!(client.renamed, [("w1:t1".into(), "[1] cargo".into())]);
+    assert!(matches!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(TabOwnership::Owned { last_base, .. }) if last_base == "cargo"
+    ));
+}
+
+#[test]
+fn toggle_off_survives_empty_labels_and_numbering_changes() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: String::new(),
+            last_rendered: "[2]".into(),
+        },
+    );
+    let session = snapshot(vec![tab("w1:t1", "w1", "[2]", false)]);
+    let mut client = FakeClient::new(session, &[]);
+    let toggle = config(
+        &directory,
+        Invocation::Toggle {
+            workspace_id: Some("w1".into()),
+            tab_id: Some("w1:t1".into()),
+        },
+    );
+    run_pass(&toggle, &toggle.invocation, &mut client).unwrap();
+
+    client.snapshot.tabs[0].tab.label = "[1]".into();
+    client.current.get_mut("w1:t1").unwrap().label = "[1]".into();
+    let renamed = config(
+        &directory,
+        Invocation::RenamedTab {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+        },
+    );
+    run_pass(&renamed, &renamed.invocation, &mut client).unwrap();
+
+    assert_eq!(client.renamed, [("w1:t1".into(), "[1]".into())]);
+    assert_eq!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(&TabOwnership::AutomaticDisabled)
+    );
+}
+
+#[test]
+fn whitespace_rename_reenables_naming_after_toggle_off() {
+    let directory = TestDir::new();
+    set_ownership(&directory, TabOwnership::AutomaticDisabled);
+    let mut client = FakeClient::new(
+        snapshot(vec![tab("w1:t1", "w1", "   ", false)]),
+        &[("w1:t1:pane", "nvim")],
+    );
+    let mut config = config(
+        &directory,
+        Invocation::RenamedTab {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+        },
+    );
+    config.settings.number_tabs = false;
+
+    run_pass(&config, &config.invocation, &mut client).unwrap();
+
+    assert_eq!(client.renamed, [("w1:t1".into(), "nvim".into())]);
+    assert!(matches!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(TabOwnership::Owned { last_base, .. }) if last_base == "nvim"
+    ));
+}
+
+#[test]
+fn toggle_resolves_a_completed_pending_rename_before_disabling() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::PendingRename {
+            observed: "[1] nvim".into(),
+            desired: "[1] cargo".into(),
+            desired_base: "cargo".into(),
+            previous_base: Some("nvim".into()),
+            previous_rendered: Some("[1] nvim".into()),
+            previous_reset_pending: false,
+        },
+    );
+    let mut client = FakeClient::new(
+        snapshot(vec![tab("w1:t1", "w1", "[1] cargo", false)]),
+        &[("w1:t1:pane", "cargo")],
+    );
+    let config = config(
+        &directory,
+        Invocation::Toggle {
+            workspace_id: Some("w1".into()),
+            tab_id: Some("w1:t1".into()),
+        },
+    );
+
+    run_pass(&config, &config.invocation, &mut client).unwrap();
+
+    assert!(client.renamed.is_empty());
+    assert_eq!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(&TabOwnership::AutomaticDisabled)
+    );
+}
+
+#[test]
 fn whitespace_only_manual_label_reenables_naming_without_numbering() {
     let directory = TestDir::new();
     set_ownership(&directory, TabOwnership::Manual);

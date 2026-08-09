@@ -52,12 +52,24 @@ pub(crate) fn run_pass(
             }
             state.persist()?;
         }
+        Invocation::Toggle { .. } => {
+            state.set_suspended(false);
+            state.persist()?;
+        }
         _ if state.is_suspended() => return Ok(()),
         _ => {}
     }
 
     let snapshot = client.snapshot()?;
     recover_pending(&snapshot, &mut state);
+    if let Invocation::Toggle {
+        tab_id: Some(tab_id),
+        ..
+    } = invocation
+    {
+        toggle_ownership(&snapshot, &mut state, tab_id);
+        state.persist()?;
+    }
     let policy = naming_policy(&config.settings);
     let fallback_shell = fallback_shell();
     let targets = scoped_tabs(&snapshot, invocation);
@@ -137,6 +149,12 @@ fn reconcile_tab(
     let tab = &session_tab.tab;
     let current_base = strip_numeric_prefix(&tab.label);
     let ownership = state.ownership(&tab.tab_id).cloned();
+    let renamed_to_whitespace = !tab.label.is_empty()
+        && tab.label.trim().is_empty()
+        && matches!(
+            invocation,
+            Invocation::RenamedTab { tab_id, .. } if tab_id == &tab.tab_id
+        );
     let forced = matches!(
         invocation,
         Invocation::Reset {
@@ -160,6 +178,11 @@ fn reconcile_tab(
                 true
             }
             Some(TabOwnership::Manual) => false,
+            Some(TabOwnership::AutomaticDisabled) if renamed_to_whitespace => {
+                state.remove_ownership(&tab.tab_id);
+                true
+            }
+            Some(TabOwnership::AutomaticDisabled) => false,
             Some(TabOwnership::ResetPending) => true,
             Some(TabOwnership::Owned { last_base, .. }) if current_base == last_base => true,
             Some(TabOwnership::Owned { .. }) => {
@@ -435,6 +458,10 @@ fn scoped_tabs<'a>(snapshot: &'a SessionSnapshot, invocation: &Invocation) -> Ve
         Invocation::Reset {
             workspace_id: Some(workspace_id),
             tab_id,
+        }
+        | Invocation::Toggle {
+            workspace_id: Some(workspace_id),
+            tab_id,
         } => (Some(workspace_id.as_str()), tab_id.as_deref()),
         _ => (None, None),
     };
@@ -472,6 +499,25 @@ fn recover_pending(snapshot: &SessionSnapshot, state: &mut State) {
     for tab in &snapshot.tabs {
         state.resolve_pending_rename(&tab.tab.tab_id, &tab.tab.label);
     }
+}
+
+fn toggle_ownership(snapshot: &SessionSnapshot, state: &mut State, tab_id: &str) {
+    let Some(tab) = snapshot.tabs.iter().find(|tab| tab.tab.tab_id == tab_id) else {
+        return;
+    };
+    let enable = match state.ownership(tab_id) {
+        Some(TabOwnership::Manual | TabOwnership::AutomaticDisabled) => true,
+        Some(_) => false,
+        None => !is_placeholder(strip_numeric_prefix(&tab.tab.label)),
+    };
+    state.set_ownership(
+        tab_id,
+        if enable {
+            TabOwnership::ResetPending
+        } else {
+            TabOwnership::AutomaticDisabled
+        },
+    );
 }
 
 fn naming_policy(settings: &Settings) -> NamingPolicy {

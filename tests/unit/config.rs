@@ -49,6 +49,24 @@ fn shell_modes_require_only_safe_arguments() {
 }
 
 #[test]
+fn toggle_uses_the_current_plugin_context() {
+    assert_eq!(
+        invocation_from(
+            &strings(&["toggle"]),
+            None,
+            Some("w1".into()),
+            Some("w1:t1".into()),
+            Some("w1:p1".into())
+        )
+        .unwrap(),
+        Invocation::Toggle {
+            workspace_id: Some("w1".into()),
+            tab_id: Some("w1:t1".into()),
+        }
+    );
+}
+
+#[test]
 fn close_and_focus_events_have_precise_invocations() {
     assert_eq!(
         event_invocation(Some("tab.closed"), Some("w1".into()), Some("w1:t2".into())),
