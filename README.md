@@ -22,9 +22,9 @@ descriptive label, see its number beside it, and quickly switch to it with
 
 The numbering stays accurate when tabs are created, deleted, reordered, or
 renamed. New tabs with Herdr-generated numeric labels are adopted for automatic
-naming. Meaningful existing labels are treated as manual and remain untouched
-apart from their number prefix. A reset action can hand a manual tab back to
-automatic naming.
+naming. Renaming a tab to a meaningful label gives that tab a fixed name while
+its number remains up to date. Resetting the tab, assigning a whitespace-only
+label, or using the toggle can hand it back to automatic naming.
 
 The Rust engine communicates directly with Herdr's local socket. It uses no
 runtime shell engine or `jq`, keeps ownership state isolated by Herdr session,
@@ -83,7 +83,13 @@ immediately.
 When Bash already has a `DEBUG` trap and exposes no `preexec_functions` hook
 array, Herdr Labels preserves that trap and provides prompt-time updates only.
 
-## Configuration
+## Control behavior
+
+Automatic naming and numbering are independent. You can configure their global
+defaults, opt individual tabs in or out of automatic naming, or suspend all
+label changes in one Herdr session.
+
+### Global configuration
 
 The defaults enable automatic naming and numbering. To customize them, copy
 `config.example.toml` to `${XDG_CONFIG_HOME:-$HOME/.config}/herdr-labels/config.toml`.
@@ -105,7 +111,39 @@ bv = "beads_viewer"
 Generated labels remove terminal control characters and never include command
 arguments.
 
-## Actions
+The two primary settings control all tabs:
+
+| Setting | `true` | `false` |
+| --- | --- | --- |
+| `auto_name_tabs` | Eligible tabs follow their foreground process. | Process changes do not rename tabs. |
+| `number_tabs` | Every tab keeps its one-based `[n]` prefix. | Generated number prefixes are removed and no longer added. |
+
+These settings are independent. For example, setting `auto_name_tabs = false`
+and `number_tabs = true` keeps tab numbers current without changing semantic
+names. Per-tab actions cannot override a globally disabled `auto_name_tabs`
+setting.
+
+### Individual tabs
+
+When global automatic naming is enabled, you can choose the behavior of each
+tab independently. Numbering continues in every case when `number_tabs` is
+enabled.
+
+- Rename a tab to a non-blank label to keep that name fixed and stop automatic
+  naming for that tab.
+- Rename a tab to a whitespace-only label, such as one space, to restore
+  automatic naming. A completely empty field cancels Herdr's rename.
+- Use `toggle` to switch the current tab between a fixed name and automatic
+  naming.
+- Use `reset` when you only want to ensure that automatic naming is enabled for
+  the current tab.
+
+Toggle the current tab between automatic and fixed naming (or use the
+keybinding below):
+
+```bash
+herdr plugin action invoke toggle --plugin angel-o.labels
+```
 
 Reset the current tab to automatic naming:
 
@@ -113,19 +151,7 @@ Reset the current tab to automatic naming:
 herdr plugin action invoke reset --plugin angel-o.labels
 ```
 
-Alternatively, use Herdr's normal rename dialog and submit a whitespace-only
-label, such as a single space. A completely empty field cancels Herdr's rename;
-a whitespace-only label is submitted and tells Herdr Labels to resume automatic
-naming.
-
-Toggle automatic naming for the current tab:
-
-```bash
-herdr plugin action invoke toggle --plugin angel-o.labels
-```
-
-Turning automatic naming off preserves the current name while numbering
-continues. Toggling again re-adopts the foreground process.
+### Toggle keybinding
 
 To bind this toggle to `prefix+option+r` on macOS (`prefix+alt+r` in Herdr's
 key syntax), add this to `~/.config/herdr/config.toml`:
@@ -144,13 +170,17 @@ Reload the configuration after editing it:
 herdr server reload-config
 ```
 
+### Session-wide suspension
+
 Clear number prefixes and suspend changes in the current session:
 
 ```bash
 herdr plugin action invoke clear --plugin angel-o.labels
 ```
 
-Invoking `reset` later resumes the session and re-adopts the current tab.
+Unlike `auto_name_tabs = false`, `clear` also suspends numbering. Invoking
+`reset` or `toggle` later resumes the session and applies that action to the
+current tab.
 
 ## Uninstall
 
