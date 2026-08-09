@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 
 use crate::filesystem::{ensure_private_directory, reject_symlink};
 
+#[cfg(test)]
+const LOCK_TIMEOUT: Duration = Duration::from_secs(1);
 const LOCK_RETRY_DELAY: Duration = Duration::from_millis(25);
 
 /// Exclusive reconciliation ownership held until this value is dropped.
@@ -18,7 +20,7 @@ pub(crate) struct ReconciliationLock {
 impl ReconciliationLock {
     #[cfg(test)]
     pub(crate) fn acquire(state_dir: &Path) -> io::Result<Self> {
-        Self::acquire_with_timeout(state_dir, Duration::from_secs(1))
+        Self::acquire_with_timeout(state_dir, LOCK_TIMEOUT)
     }
 
     /// Attempts to acquire reconciliation ownership without waiting.
@@ -71,16 +73,15 @@ impl ReconciliationLock {
         loop {
             match file.try_lock() {
                 Ok(()) => break,
-                Err(TryLockError::WouldBlock)
-                    if let Some(delay) = retry_delay(deadline, Instant::now()) =>
-                {
-                    std::thread::sleep(delay);
-                }
                 Err(TryLockError::WouldBlock) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "timed out waiting for another reconciliation",
-                    ));
+                    if let Some(delay) = retry_delay(deadline, Instant::now()) {
+                        std::thread::sleep(delay);
+                    } else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "timed out waiting for another reconciliation",
+                        ));
+                    }
                 }
                 Err(TryLockError::Error(error)) => return Err(error),
             }
