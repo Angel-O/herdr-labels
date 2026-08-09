@@ -301,6 +301,147 @@ fn unowned_placeholder_waits_for_authoritative_shell_hook() {
 }
 
 #[test]
+fn eager_shell_claim_is_owned_before_ambient_events_run() {
+    let directory = TestDir::new();
+    let mut client = FakeClient::new(
+        snapshot(vec![tab("w1:t1", "w1", "1", false)]),
+        &[("w1:t1:pane", "zsh")],
+    );
+    let init = config(
+        &directory,
+        Invocation::Init {
+            pane_id: "w1:t1:pane".into(),
+            shell: "zsh".into(),
+            shell_pid: 7,
+        },
+    );
+
+    run_pass(&init, &init.invocation, &mut client).unwrap();
+
+    assert_eq!(client.renamed, [("w1:t1".into(), "[1] zsh".into())]);
+    assert_eq!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(&TabOwnership::Owned {
+            last_base: "zsh".into(),
+            last_rendered: "[1] zsh".into(),
+        })
+    );
+
+    client.snapshot.tabs[0].tab.label = "[1] zsh".into();
+    client
+        .processes
+        .insert("w1:t1:pane".into(), process_info("locale"));
+    let ambient = config(&directory, Invocation::Full);
+    run_pass(&ambient, &ambient.invocation, &mut client).unwrap();
+
+    assert_eq!(client.renamed.len(), 1);
+    assert_eq!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(&TabOwnership::Owned {
+            last_base: "zsh".into(),
+            last_rendered: "[1] zsh".into(),
+        })
+    );
+}
+
+#[test]
+fn manual_rename_after_eager_startup_is_preserved() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: "zsh".into(),
+            last_rendered: "[1] zsh".into(),
+        },
+    );
+    let mut client = FakeClient::new(
+        snapshot(vec![tab("w1:t1", "w1", "custom", false)]),
+        &[("w1:t1:pane", "locale")],
+    );
+    let renamed = config(
+        &directory,
+        Invocation::RenamedTab {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+        },
+    );
+
+    run_pass(&renamed, &renamed.invocation, &mut client).unwrap();
+
+    assert!(client.renamed.is_empty());
+    assert_eq!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(&TabOwnership::Manual)
+    );
+}
+
+#[test]
+fn same_base_manual_renames_transfer_ownership() {
+    for label in ["zsh", "[9] zsh"] {
+        let directory = TestDir::new();
+        set_ownership(
+            &directory,
+            TabOwnership::Owned {
+                last_base: "zsh".into(),
+                last_rendered: "[1] zsh".into(),
+            },
+        );
+        let mut client = FakeClient::new(
+            snapshot(vec![tab("w1:t1", "w1", label, false)]),
+            &[("w1:t1:pane", "zsh")],
+        );
+        let renamed = config(
+            &directory,
+            Invocation::RenamedTab {
+                workspace_id: "w1".into(),
+                tab_id: "w1:t1".into(),
+            },
+        );
+
+        run_pass(&renamed, &renamed.invocation, &mut client).unwrap();
+
+        assert!(client.renamed.is_empty(), "unexpected rename for {label}");
+        assert_eq!(
+            State::load(&directory.0).unwrap().ownership("w1:t1"),
+            Some(&TabOwnership::Manual),
+            "ownership for {label}"
+        );
+    }
+}
+
+#[test]
+fn prompt_cannot_overwrite_manual_rename_before_its_event_arrives() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: "zsh".into(),
+            last_rendered: "[1] zsh".into(),
+        },
+    );
+    let mut client = FakeClient::new(
+        snapshot(vec![tab("w1:t1", "w1", "custom", false)]),
+        &[("w1:t1:pane", "zsh")],
+    );
+    let prompt = config(
+        &directory,
+        Invocation::Precmd {
+            pane_id: "w1:t1:pane".into(),
+            shell: "zsh".into(),
+            shell_pid: 7,
+        },
+    );
+
+    run_pass(&prompt, &prompt.invocation, &mut client).unwrap();
+
+    assert!(client.renamed.is_empty());
+    assert_eq!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(&TabOwnership::Manual)
+    );
+}
+
+#[test]
 fn verified_preexec_can_claim_an_unowned_placeholder() {
     let directory = TestDir::new();
     let mut client = FakeClient::new(
@@ -378,6 +519,16 @@ fn rejected_authoritative_events_leave_an_unowned_placeholder_untouched() {
         },
     );
     run_pass(&stale_precmd, &stale_precmd.invocation, &mut client).unwrap();
+
+    let stale_init = config(
+        &directory,
+        Invocation::Init {
+            pane_id: "w1:t1:pane".into(),
+            shell: "zsh".into(),
+            shell_pid: 8,
+        },
+    );
+    run_pass(&stale_init, &stale_init.invocation, &mut client).unwrap();
 
     assert!(client.renamed.is_empty());
     assert_eq!(State::load(&directory.0).unwrap().ownership("w1:t1"), None);
@@ -799,7 +950,7 @@ fn reset_intent_survives_until_process_information_is_available() {
 }
 
 #[test]
-fn failed_owned_transition_retries_without_becoming_manual() {
+fn failed_owned_transition_waits_for_an_authoritative_process_event() {
     let directory = TestDir::new();
     set_ownership(
         &directory,
@@ -819,15 +970,15 @@ fn failed_owned_transition_retries_without_becoming_manual() {
     let config = config(&directory, Invocation::Full);
     run_pass(&config, &config.invocation, &mut client).unwrap();
 
-    assert_eq!(client.renamed[0].1, "[1] cargo");
+    assert!(client.renamed.is_empty());
     assert!(matches!(
         State::load(&directory.0).unwrap().ownership("w1:t1"),
-        Some(TabOwnership::Owned { last_base, .. }) if last_base == "cargo"
+        Some(TabOwnership::Owned { last_base, .. }) if last_base == "nvim"
     ));
 }
 
 #[test]
-fn own_rename_event_does_not_undo_a_fast_path_name() {
+fn lifecycle_events_do_not_replace_an_owned_semantic_name() {
     let directory = TestDir::new();
     set_ownership(
         &directory,
@@ -856,7 +1007,11 @@ fn own_rename_event_does_not_undo_a_fast_path_name() {
         },
     );
     run_pass(&focused, &focused.invocation, &mut client).unwrap();
-    assert_eq!(client.renamed[0].1, "[1] zsh");
+    assert!(client.renamed.is_empty());
+    assert!(matches!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(TabOwnership::Owned { last_base, .. }) if last_base == "nvim"
+    ));
 }
 
 #[test]

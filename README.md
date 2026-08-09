@@ -55,8 +55,16 @@ automatically.
 ## Shell hooks
 
 Herdr does not emit an event when a shell command starts or returns to its
-prompt. The optional hooks make names update immediately. They no-op outside a
-Herdr pane and launch the plugin binary asynchronously.
+prompt. The hooks establish automatic naming for new generated tabs and provide
+later command and prompt updates. They no-op outside a Herdr pane and launch the
+later updates asynchronously. The initial PID-verified claim runs synchronously
+with lock admission bounded to 100 ms so it completes before startup commands
+can be observed without waiting indefinitely on another Labels process.
+
+Load the hook near the beginning of the shell configuration, after basic `PATH`
+setup but before slower tools such as NVM, SDKMAN, or prompt frameworks. Its
+first update is PID-verified, so loading it early cannot let a startup helper
+claim the tab.
 
 For Zsh, add this to `~/.zshrc`:
 
@@ -75,10 +83,16 @@ for _f in "$HOME"/.config/herdr/plugins/github/angel-o.labels-*/shell/hook.bash;
 done
 ```
 
-The shell hook is required for a new generated tab to enter automatic naming.
-Herdr focus and pane events never establish its first semantic name; only a
-process-verified `preexec` or PID-verified `precmd` can do that. This prevents
-startup helpers from briefly claiming the tab before the shell is ready.
+If a Bash prompt framework replaces `PROMPT_COMMAND`, source the hook again
+after that framework loads. The second source repairs prompt registration
+without repeating the initial claim.
+
+When loaded, the hook immediately submits a PID-verified shell name. It enables
+`preexec` only at the first prompt, after shell startup has finished. Later,
+process-verified `preexec` and PID-verified `precmd` updates follow commands and
+prompts. Herdr focus and pane events never establish the first semantic name.
+After adoption, those lifecycle events preserve the owned semantic name and
+update numbering only; shell hooks provide semantic process changes.
 When Bash already has a `DEBUG` trap and exposes no `preexec_functions` hook
 array, Herdr Labels preserves that trap and provides prompt-time updates only.
 

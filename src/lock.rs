@@ -71,7 +71,7 @@ impl ReconciliationLock {
         }
     }
 
-    fn acquire_with_timeout(state_dir: &Path, timeout: Duration) -> io::Result<Self> {
+    pub(crate) fn acquire_with_timeout(state_dir: &Path, timeout: Duration) -> io::Result<Self> {
         ensure_private_directory(state_dir)?;
         let file = open_lock_file(state_dir)?;
         let deadline = Instant::now() + timeout;
