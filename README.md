@@ -75,11 +75,10 @@ for _f in "$HOME"/.config/herdr/plugins/github/angel-o.labels-*/shell/hook.bash;
 done
 ```
 
-Without a hook, automatic naming still converges on Herdr focus and pane events.
-For a new generated tab, ambient events accept only a configured shell as the
-first semantic name; startup helpers cannot claim the tab before the shell is
-ready. A verified `preexec` or the first `precmd` can establish the name
-immediately.
+The shell hook is required for a new generated tab to enter automatic naming.
+Herdr focus and pane events never establish its first semantic name; only a
+process-verified `preexec` or PID-verified `precmd` can do that. This prevents
+startup helpers from briefly claiming the tab before the shell is ready.
 When Bash already has a `DEBUG` trap and exposes no `preexec_functions` hook
 array, Herdr Labels preserves that trap and provides prompt-time updates only.
 

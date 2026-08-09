@@ -265,7 +265,7 @@ fn launcher_arguments_verify_a_program_before_its_child_appears() {
 }
 
 #[test]
-fn ambient_startup_helper_cannot_claim_an_unowned_placeholder() {
+fn unowned_placeholder_waits_for_authoritative_shell_hook() {
     let directory = TestDir::new();
     let mut client = FakeClient::new(
         snapshot(vec![tab("w1:t1", "w1", "1", false)]),
@@ -281,6 +281,14 @@ fn ambient_startup_helper_cannot_claim_an_unowned_placeholder() {
         .processes
         .insert("w1:t1:pane".into(), process_info("zsh"));
     run_pass(&config, &config.invocation, &mut client).unwrap();
+    assert!(client.renamed.is_empty());
+
+    let precmd = Invocation::Precmd {
+        pane_id: "w1:t1:pane".into(),
+        shell: "zsh".into(),
+        shell_pid: 7,
+    };
+    run_pass(&config, &precmd, &mut client).unwrap();
 
     assert_eq!(client.renamed, [("w1:t1".into(), "[1] zsh".into())]);
     assert_eq!(
@@ -315,6 +323,64 @@ fn verified_preexec_can_claim_an_unowned_placeholder() {
         State::load(&directory.0).unwrap().ownership("w1:t1"),
         Some(TabOwnership::Owned { last_base, .. }) if last_base == "bv"
     ));
+}
+
+#[test]
+fn sampled_preexec_cannot_claim_an_unowned_placeholder() {
+    let directory = TestDir::new();
+    let mut client = FakeClient::new(
+        snapshot(vec![tab("w1:t1", "w1", "1", false)]),
+        &[("w1:t1:pane", "locale")],
+    );
+    let config = config(
+        &directory,
+        Invocation::Preexec {
+            pane_id: "w1:t1:pane".into(),
+            shell: "zsh".into(),
+            program: None,
+        },
+    );
+
+    run_pass(&config, &config.invocation, &mut client).unwrap();
+
+    assert!(client.renamed.is_empty());
+    assert_eq!(State::load(&directory.0).unwrap().ownership("w1:t1"), None);
+}
+
+#[test]
+fn rejected_authoritative_events_leave_an_unowned_placeholder_untouched() {
+    let directory = TestDir::new();
+    let mut client = FakeClient::new(
+        snapshot(vec![tab("w1:t1", "w1", "1", false)]),
+        &[("w1:t1:pane", "zsh")],
+    );
+    let mismatched_preexec = config(
+        &directory,
+        Invocation::Preexec {
+            pane_id: "w1:t1:pane".into(),
+            shell: "zsh".into(),
+            program: Some("nvim".into()),
+        },
+    );
+    run_pass(
+        &mismatched_preexec,
+        &mismatched_preexec.invocation,
+        &mut client,
+    )
+    .unwrap();
+
+    let stale_precmd = config(
+        &directory,
+        Invocation::Precmd {
+            pane_id: "w1:t1:pane".into(),
+            shell: "zsh".into(),
+            shell_pid: 8,
+        },
+    );
+    run_pass(&stale_precmd, &stale_precmd.invocation, &mut client).unwrap();
+
+    assert!(client.renamed.is_empty());
+    assert_eq!(State::load(&directory.0).unwrap().ownership("w1:t1"), None);
 }
 
 #[test]
@@ -390,7 +456,14 @@ fn numbering_can_be_disabled_independently() {
         snapshot(vec![tab("w1:t1", "w1", "1", false)]),
         &[("w1:t1:pane", "zsh")],
     );
-    let mut config = config(&directory, Invocation::Full);
+    let mut config = config(
+        &directory,
+        Invocation::Precmd {
+            pane_id: "w1:t1:pane".into(),
+            shell: "zsh".into(),
+            shell_pid: 7,
+        },
+    );
     config.settings.number_tabs = false;
     run_pass(&config, &config.invocation, &mut client).unwrap();
     assert_eq!(client.renamed[0].1, "zsh");
