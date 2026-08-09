@@ -1,6 +1,6 @@
 id = "angel-o.labels"
 name = "Labels"
-version = "0.1.0"
+version = "0.1.1"
 min_herdr_version = "0.7.5"
 description = "Automatically name and number tabs while preserving manual labels."
 platforms = ["macos", "linux"]

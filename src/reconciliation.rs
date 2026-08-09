@@ -155,7 +155,7 @@ fn reconcile_tab(
         true
     } else {
         match ownership.as_ref() {
-            Some(TabOwnership::Manual) if current_base.is_empty() => {
+            Some(TabOwnership::Manual) if current_base.trim().is_empty() => {
                 state.remove_ownership(&tab.tab_id);
                 true
             }

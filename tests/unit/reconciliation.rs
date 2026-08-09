@@ -497,6 +497,32 @@ fn reset_reclaims_a_manual_tab() {
 }
 
 #[test]
+fn whitespace_only_manual_label_reenables_naming_without_numbering() {
+    let directory = TestDir::new();
+    set_ownership(&directory, TabOwnership::Manual);
+    let mut client = FakeClient::new(
+        snapshot(vec![tab("w1:t1", "w1", "   ", false)]),
+        &[("w1:t1:pane", "nvim")],
+    );
+    let mut config = config(
+        &directory,
+        Invocation::RenamedTab {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+        },
+    );
+    config.settings.number_tabs = false;
+
+    run_pass(&config, &config.invocation, &mut client).unwrap();
+
+    assert_eq!(client.renamed, [("w1:t1".into(), "nvim".into())]);
+    assert!(matches!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(TabOwnership::Owned { last_base, .. }) if last_base == "nvim"
+    ));
+}
+
+#[test]
 fn reset_uses_the_current_numbering_configuration() {
     let directory = TestDir::new();
     set_ownership(&directory, TabOwnership::Manual);

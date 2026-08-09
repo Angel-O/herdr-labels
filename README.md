@@ -113,6 +113,28 @@ Reset the current tab to automatic naming:
 herdr plugin action invoke reset --plugin angel-o.labels
 ```
 
+Alternatively, use Herdr's normal rename dialog and submit a whitespace-only
+label, such as a single space. A completely empty field cancels Herdr's rename;
+a whitespace-only label is submitted and tells Herdr Labels to resume automatic
+naming.
+
+To bind reset to `prefix+option+r` on macOS (`prefix+alt+r` in Herdr's key
+syntax), add this to `~/.config/herdr/config.toml`:
+
+```toml
+[[keys.command]]
+key = "prefix+alt+r"
+type = "plugin_action"
+command = "angel-o.labels.reset"
+description = "reset tab to automatic naming"
+```
+
+Reload the configuration after editing it:
+
+```bash
+herdr server reload-config
+```
+
 Clear number prefixes and suspend changes in the current session:
 
 ```bash
