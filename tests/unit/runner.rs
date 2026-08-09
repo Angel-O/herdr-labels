@@ -32,8 +32,10 @@ impl Drop for TestDir {
 struct FakeClient {
     tabs: VecDeque<Option<Tab>>,
     fallback_tab: Option<Tab>,
+    tab_reads: usize,
     snapshots: usize,
     rerun_on_first_snapshot: Option<PathBuf>,
+    rerun_on_every_snapshot: Option<PathBuf>,
 }
 
 struct ProcessClient {
@@ -51,8 +53,10 @@ impl FakeClient {
         Self {
             tabs: VecDeque::new(),
             fallback_tab: tab,
+            tab_reads: 0,
             snapshots: 0,
             rerun_on_first_snapshot: None,
+            rerun_on_every_snapshot: None,
         }
     }
 }
@@ -65,6 +69,9 @@ impl TabClient for FakeClient {
         {
             ReconciliationLock::request_rerun(state_dir)?;
         }
+        if let Some(state_dir) = &self.rerun_on_every_snapshot {
+            ReconciliationLock::request_rerun(state_dir)?;
+        }
         Ok(SessionSnapshot {
             focused_pane_id: None,
             tabs: Vec::new(),
@@ -73,6 +80,7 @@ impl TabClient for FakeClient {
     }
 
     fn get_tab(&mut self, _tab_id: &str) -> Result<Option<Tab>> {
+        self.tab_reads += 1;
         Ok(self
             .tabs
             .pop_front()
@@ -204,11 +212,79 @@ fn coalescing_consumes_a_rerun_requested_during_the_first_pass() {
     let config = config(&directory, Invocation::Full);
     let mut client = FakeClient::with_tab(None);
     client.rerun_on_first_snapshot = Some(directory.0.clone());
+    let mut remaining_passes = MAX_RECONCILIATION_PASSES;
 
-    run_coalesced_passes(&config, &Invocation::Workspace("w1".into()), &mut client).unwrap();
+    run_coalesced_passes(
+        &config,
+        &Invocation::Workspace("w1".into()),
+        &mut client,
+        &mut remaining_passes,
+    )
+    .unwrap();
 
     assert_eq!(client.snapshots, 2);
+    assert_eq!(remaining_passes, MAX_RECONCILIATION_PASSES - 2);
     assert!(!ReconciliationLock::rerun_requested(&directory.0).unwrap());
+}
+
+#[test]
+fn continuous_reruns_stop_at_the_process_pass_budget() {
+    let directory = TestDir::new();
+    let config = config(&directory, Invocation::Full);
+    let mut client = FakeClient::with_tab(None);
+    client.rerun_on_every_snapshot = Some(directory.0.clone());
+    let mut remaining_passes = MAX_RECONCILIATION_PASSES;
+
+    run_coalesced_passes(
+        &config,
+        &Invocation::Full,
+        &mut client,
+        &mut remaining_passes,
+    )
+    .unwrap();
+
+    assert_eq!(client.snapshots, MAX_RECONCILIATION_PASSES);
+    assert_eq!(remaining_passes, 0);
+    assert!(ReconciliationLock::rerun_requested(&directory.0).unwrap());
+}
+
+#[test]
+fn handoff_uses_only_the_remaining_process_pass_budget() {
+    let directory = TestDir::new();
+    let config = config(&directory, Invocation::Full);
+    let mut client = FakeClient::with_tab(None);
+    client.rerun_on_every_snapshot = Some(directory.0.clone());
+    ReconciliationLock::request_rerun(&directory.0).unwrap();
+    let mut remaining_passes = 2;
+
+    handoff_after_release(&config, &mut client, &mut remaining_passes).unwrap();
+
+    assert_eq!(client.snapshots, 2);
+    assert_eq!(remaining_passes, 0);
+    assert!(ReconciliationLock::rerun_requested(&directory.0).unwrap());
+}
+
+#[test]
+fn invocation_classes_have_distinct_bounded_lock_policies() {
+    let init = Invocation::Init {
+        pane_id: "pane".into(),
+        shell: "zsh".into(),
+        shell_pid: 7,
+    };
+    let shell = Invocation::Precmd {
+        pane_id: "pane".into(),
+        shell: "zsh".into(),
+        shell_pid: 7,
+    };
+    let action = Invocation::Clear;
+
+    assert_eq!(exact_lock_timeout(&init), Some(INIT_LOCK_TIMEOUT));
+    assert_eq!(exact_lock_timeout(&shell), Some(SHELL_LOCK_TIMEOUT));
+    assert_eq!(exact_lock_timeout(&action), Some(ACTION_LOCK_TIMEOUT));
+    assert!(timeout_is_benign(&init));
+    assert!(timeout_is_benign(&shell));
+    assert!(!timeout_is_benign(&action));
+    assert!(exact_lock_timeout(&Invocation::Full).is_none());
 }
 
 #[test]
@@ -231,13 +307,70 @@ fn contended_init_times_out_without_requesting_a_generic_rerun() {
 }
 
 #[test]
+fn contended_shell_update_exits_within_its_short_admission_bound() {
+    let directory = TestDir::new();
+    let _lock = ReconciliationLock::acquire(&directory.0).unwrap();
+    let config = config(
+        &directory,
+        Invocation::Precmd {
+            pane_id: "w1:t1:pane".into(),
+            shell: "zsh".into(),
+            shell_pid: 7,
+        },
+    );
+    let started = Instant::now();
+
+    run(config).unwrap();
+
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(!ReconciliationLock::rerun_requested(&directory.0).unwrap());
+}
+
+#[test]
+fn contended_preexec_skips_settling_before_it_touches_the_socket() {
+    let directory = TestDir::new();
+    let _lock = ReconciliationLock::acquire(&directory.0).unwrap();
+    let config = config(
+        &directory,
+        Invocation::Preexec {
+            pane_id: "w1:t1:pane".into(),
+            shell: "zsh".into(),
+            program: Some("nvim".into()),
+        },
+    );
+    let started = Instant::now();
+
+    run(config).unwrap();
+
+    assert!(started.elapsed() < SHELL_LOCK_TIMEOUT);
+    assert!(!ReconciliationLock::rerun_requested(&directory.0).unwrap());
+}
+
+#[test]
 fn close_settling_stops_when_the_tab_disappears() {
     let mut client = FakeClient::with_tab(None);
     client.tabs = VecDeque::from([Some(tab("work")), None]);
 
-    wait_until_closed(&mut client, "w1:t1").unwrap();
+    wait_until_closed(
+        &mut client,
+        "w1:t1",
+        Duration::from_millis(1),
+        Duration::ZERO,
+    )
+    .unwrap();
 
     assert!(client.tabs.is_empty());
+}
+
+#[test]
+fn close_settling_stops_when_its_deadline_is_exhausted() {
+    let mut client = FakeClient::with_tab(Some(tab("work")));
+
+    let error =
+        wait_until_closed(&mut client, "w1:t1", Duration::ZERO, Duration::ZERO).unwrap_err();
+
+    assert!(error.to_string().contains("remained visible"));
+    assert_eq!(client.tab_reads, 1);
 }
 
 #[test]
