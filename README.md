@@ -110,8 +110,9 @@ When loaded, the hook immediately submits a PID-verified shell name. It enables
 `preexec` only at the first prompt, after shell startup has finished. Later,
 process-verified `preexec` and PID-verified `precmd` updates follow commands and
 prompts. Herdr focus and pane events never establish the first semantic name.
-After adoption, those lifecycle events preserve the owned semantic name and
-update numbering only; shell hooks provide semantic process changes.
+After adoption, focus events refresh the owned semantic name from the active
+pane. Other lifecycle events preserve the owned semantic name and update
+numbering only; shell hooks provide semantic process changes while commands run.
 When Bash already has a `DEBUG` trap and exposes no `preexec_functions` hook
 array, Herdr Labels preserves that trap and provides prompt-time updates only.
 

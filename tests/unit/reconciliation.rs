@@ -978,7 +978,7 @@ fn failed_owned_transition_waits_for_an_authoritative_process_event() {
 }
 
 #[test]
-fn lifecycle_events_do_not_replace_an_owned_semantic_name() {
+fn rename_events_do_not_replace_an_owned_semantic_name() {
     let directory = TestDir::new();
     set_ownership(
         &directory,
@@ -998,7 +998,31 @@ fn lifecycle_events_do_not_replace_an_owned_semantic_name() {
     );
     run_pass(&renamed, &renamed.invocation, &mut client).unwrap();
     assert!(client.renamed.is_empty());
+    assert!(matches!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(TabOwnership::Owned { last_base, .. }) if last_base == "nvim"
+    ));
+}
 
+#[test]
+fn focusing_a_pane_updates_an_owned_tab_from_the_active_pane() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: "nvim".into(),
+            last_rendered: "[1] nvim".into(),
+        },
+    );
+    let mut split = tab("w1:t1", "w1", "[1] nvim", true);
+    split.pane_count = 2;
+    let mut session = snapshot(vec![split]);
+    session.panes.push(PaneInfo {
+        pane_id: "w1:t1:other".into(),
+        tab_id: "w1:t1".into(),
+    });
+    session.focused_pane_id = Some("w1:t1:other".into());
+    let mut client = FakeClient::new(session, &[("w1:t1:pane", "nvim"), ("w1:t1:other", "cargo")]);
     let focused = config(
         &directory,
         Invocation::Tab {
@@ -1007,10 +1031,10 @@ fn lifecycle_events_do_not_replace_an_owned_semantic_name() {
         },
     );
     run_pass(&focused, &focused.invocation, &mut client).unwrap();
-    assert!(client.renamed.is_empty());
+    assert_eq!(client.renamed, [("w1:t1".into(), "[1] cargo".into())]);
     assert!(matches!(
         State::load(&directory.0).unwrap().ownership("w1:t1"),
-        Some(TabOwnership::Owned { last_base, .. }) if last_base == "nvim"
+        Some(TabOwnership::Owned { last_base, .. }) if last_base == "cargo"
     ));
 }
 
