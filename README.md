@@ -299,6 +299,11 @@ refreshes retain their process-observation meaning and wait at most 250 ms for
 admission; explicit actions retain their operation-specific meaning and use a
 two-second bound. A marker raised after the final budgeted snapshot is left for
 the next event instead of extending the current worker indefinitely.
+If a semantic observation cannot acquire the lock within its admission window,
+it is dropped rather than allowed to block a shell or focus transition. An older
+observation already holding the lock can therefore commit after that newer
+observation is dropped, leaving a stale semantic name until the next shell or
+focus event refreshes it.
 Close-event polling stops starting requests after a three-second deadline; an
 in-flight request can extend wall time, with one-second read and write limits
 after the OS establishes the local socket connection. State lives
