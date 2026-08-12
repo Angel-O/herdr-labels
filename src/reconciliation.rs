@@ -220,7 +220,8 @@ fn reconcile_tab(
     );
     let observes_process = matches!(
         invocation,
-        Invocation::Init { .. }
+        Invocation::Tab { .. }
+            | Invocation::Init { .. }
             | Invocation::Preexec { .. }
             | Invocation::Precmd { .. }
             | Invocation::Reset { .. }

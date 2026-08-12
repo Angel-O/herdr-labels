@@ -110,7 +110,9 @@ pub(crate) fn run(config: Config) -> Result<()> {
 fn exact_lock_timeout(invocation: &Invocation) -> Option<Duration> {
     match invocation {
         Invocation::Init { .. } => Some(INIT_LOCK_TIMEOUT),
-        Invocation::Preexec { .. } | Invocation::Precmd { .. } => Some(SHELL_LOCK_TIMEOUT),
+        Invocation::Tab { .. } | Invocation::Preexec { .. } | Invocation::Precmd { .. } => {
+            Some(SHELL_LOCK_TIMEOUT)
+        }
         Invocation::Clear | Invocation::Reset { .. } | Invocation::Toggle { .. } => {
             Some(ACTION_LOCK_TIMEOUT)
         }
@@ -121,7 +123,10 @@ fn exact_lock_timeout(invocation: &Invocation) -> Option<Duration> {
 fn timeout_is_benign(invocation: &Invocation) -> bool {
     matches!(
         invocation,
-        Invocation::Init { .. } | Invocation::Preexec { .. } | Invocation::Precmd { .. }
+        Invocation::Tab { .. }
+            | Invocation::Init { .. }
+            | Invocation::Preexec { .. }
+            | Invocation::Precmd { .. }
     )
 }
 

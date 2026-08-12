@@ -110,8 +110,9 @@ When loaded, the hook immediately submits a PID-verified shell name. It enables
 `preexec` only at the first prompt, after shell startup has finished. Later,
 process-verified `preexec` and PID-verified `precmd` updates follow commands and
 prompts. Herdr focus and pane events never establish the first semantic name.
-After adoption, those lifecycle events preserve the owned semantic name and
-update numbering only; shell hooks provide semantic process changes.
+After adoption, focus events refresh the owned semantic name from the active
+pane. Other lifecycle events preserve the owned semantic name and update
+numbering only; shell hooks provide semantic process changes while commands run.
 When Bash already has a `DEBUG` trap and exposes no `preexec_functions` hook
 array, Herdr Labels preserves that trap and provides prompt-time updates only.
 
@@ -293,10 +294,16 @@ scripts/test-install.sh
 
 Concurrent work uses an OS-backed per-session lock. Structural events coalesce
 behind a single marker, and one process performs at most eight reconciliation
-passes across its initial work and final handoff. Shell transitions wait at most
-250 ms for admission; explicit actions retain their operation-specific meaning
-and use a two-second bound. A marker raised after the final budgeted snapshot is
-left for the next event instead of extending the current worker indefinitely.
+passes across its initial work and final handoff. Shell transitions and focus
+refreshes retain their process-observation meaning and wait at most 250 ms for
+admission; explicit actions retain their operation-specific meaning and use a
+two-second bound. A marker raised after the final budgeted snapshot is left for
+the next event instead of extending the current worker indefinitely.
+If a semantic observation cannot acquire the lock within its admission window,
+it is dropped rather than allowed to block a shell or focus transition. An older
+observation already holding the lock can therefore commit after that newer
+observation is dropped, leaving a stale semantic name until the next shell or
+focus event refreshes it.
 Close-event polling stops starting requests after a three-second deadline; an
 in-flight request can extend wall time, with one-second read and write limits
 after the OS establishes the local socket connection. State lives

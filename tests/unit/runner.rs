@@ -276,13 +276,19 @@ fn invocation_classes_have_distinct_bounded_lock_policies() {
         shell: "zsh".into(),
         shell_pid: 7,
     };
+    let focus = Invocation::Tab {
+        workspace_id: "w1".into(),
+        tab_id: "w1:t1".into(),
+    };
     let action = Invocation::Clear;
 
     assert_eq!(exact_lock_timeout(&init), Some(INIT_LOCK_TIMEOUT));
     assert_eq!(exact_lock_timeout(&shell), Some(SHELL_LOCK_TIMEOUT));
+    assert_eq!(exact_lock_timeout(&focus), Some(SHELL_LOCK_TIMEOUT));
     assert_eq!(exact_lock_timeout(&action), Some(ACTION_LOCK_TIMEOUT));
     assert!(timeout_is_benign(&init));
     assert!(timeout_is_benign(&shell));
+    assert!(timeout_is_benign(&focus));
     assert!(!timeout_is_benign(&action));
     assert!(exact_lock_timeout(&Invocation::Full).is_none());
 }
@@ -316,6 +322,25 @@ fn contended_shell_update_exits_within_its_short_admission_bound() {
             pane_id: "w1:t1:pane".into(),
             shell: "zsh".into(),
             shell_pid: 7,
+        },
+    );
+    let started = Instant::now();
+
+    run(config).unwrap();
+
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(!ReconciliationLock::rerun_requested(&directory.0).unwrap());
+}
+
+#[test]
+fn contended_focus_refresh_is_not_downgraded_to_a_generic_rerun() {
+    let directory = TestDir::new();
+    let _lock = ReconciliationLock::acquire(&directory.0).unwrap();
+    let config = config(
+        &directory,
+        Invocation::Tab {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
         },
     );
     let started = Instant::now();
