@@ -294,10 +294,11 @@ scripts/test-install.sh
 
 Concurrent work uses an OS-backed per-session lock. Structural events coalesce
 behind a single marker, and one process performs at most eight reconciliation
-passes across its initial work and final handoff. Shell transitions wait at most
-250 ms for admission; explicit actions retain their operation-specific meaning
-and use a two-second bound. A marker raised after the final budgeted snapshot is
-left for the next event instead of extending the current worker indefinitely.
+passes across its initial work and final handoff. Shell transitions and focus
+refreshes retain their process-observation meaning and wait at most 250 ms for
+admission; explicit actions retain their operation-specific meaning and use a
+two-second bound. A marker raised after the final budgeted snapshot is left for
+the next event instead of extending the current worker indefinitely.
 Close-event polling stops starting requests after a three-second deadline; an
 in-flight request can extend wall time, with one-second read and write limits
 after the OS establishes the local socket connection. State lives
