@@ -135,7 +135,7 @@ hide_idle_shell = false
 max_label_chars = 24
 
 shells = ["zsh", "bash", "sh", "dash", "ksh"]
-ignored_processes = ["ls", "cat", "pwd", "clear", "git", "direnv"]
+ignored_processes = ["ls", "cat", "pwd", "clear", "git", "direnv", "scutil"]
 
 [process_aliases]
 bv = "beads_viewer"

@@ -33,7 +33,7 @@ fn malformed_settings_files_are_rejected() {
 #[test]
 fn transient_prompt_programs_are_ignored_by_default() {
     let settings = Settings::default();
-    for program in ["git", "direnv"] {
+    for program in ["git", "direnv", "scutil"] {
         assert!(
             settings
                 .ignored_processes
