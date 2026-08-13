@@ -50,7 +50,7 @@ impl Default for Settings {
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
-            ignored_processes: ["ls", "cat", "pwd", "clear", "git", "direnv"]
+            ignored_processes: ["ls", "cat", "pwd", "clear", "git", "direnv", "scutil"]
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),

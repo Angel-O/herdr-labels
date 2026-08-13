@@ -15,7 +15,7 @@ max_label_chars = 24
 shells = ["zsh", "bash", "sh", "dash", "ksh"]
 
 # Short-lived commands that keep the tab displaying its shell name.
-ignored_processes = ["ls", "cat", "pwd", "clear", "git", "direnv"]
+ignored_processes = ["ls", "cat", "pwd", "clear", "git", "direnv", "scutil"]
 
 # Exact program-name replacements.
 [process_aliases]
