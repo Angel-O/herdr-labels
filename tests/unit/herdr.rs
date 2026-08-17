@@ -57,7 +57,9 @@ fn requests_and_parses_a_session_snapshot() {
                         "tab_id": "w1:t1", "workspace_id": "w1", "label": "1",
                         "focused": true, "pane_count": 1
                     }],
-                    "panes": [{"pane_id": "w1:p1", "tab_id": "w1:t1"}]
+                    "panes": [{
+                        "pane_id": "w1:p1", "tab_id": "w1:t1", "agent": "opencode"
+                    }]
                 }
             }
         });
@@ -69,6 +71,7 @@ fn requests_and_parses_a_session_snapshot() {
     assert_eq!(snapshot.focused_pane_id.as_deref(), Some("w1:p1"));
     assert_eq!(snapshot.tabs[0].tab.label, "1");
     assert_eq!(snapshot.panes[0].pane_id, "w1:p1");
+    assert_eq!(snapshot.panes[0].agent.as_deref(), Some("opencode"));
     server.join().unwrap();
     std::fs::remove_file(socket_path).unwrap();
 }
