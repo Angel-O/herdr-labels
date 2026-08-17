@@ -188,6 +188,8 @@ pub(crate) struct SessionTab {
 pub(crate) struct PaneInfo {
     pub(crate) pane_id: String,
     pub(crate) tab_id: String,
+    #[serde(default)]
+    pub(crate) agent: Option<String>,
 }
 
 /// Foreground processes associated with one pane.

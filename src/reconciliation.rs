@@ -333,7 +333,7 @@ fn computed_name(
             let Ok(process_info) = client.pane_process_info(pane_id) else {
                 return Ok(None);
             };
-            let Some(_) = representative_process(&process_info, policy) else {
+            let Some(_) = representative_process(&process_info, policy, None) else {
                 return Ok(None);
             };
             if !process_group_matches_program(&process_info, program, policy) {
@@ -377,7 +377,13 @@ fn computed_name(
             let Ok(process_info) = client.pane_process_info(pane_id) else {
                 return Ok(None);
             };
-            let Some(process) = representative_process(&process_info, policy) else {
+            let preferred_program = snapshot
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == pane_id)
+                .and_then(|pane| pane.agent.as_deref());
+            let Some(process) = representative_process(&process_info, policy, preferred_program)
+            else {
                 return Ok(None);
             };
             if ambient_shell_only && !policy.is_shell_program(process.program()) {
@@ -424,8 +430,17 @@ fn process_group_matches_program(
 fn representative_process<'a>(
     process_info: &'a PaneProcessInfo,
     policy: &NamingPolicy,
+    preferred_program: Option<&str>,
 ) -> Option<&'a crate::herdr::ProcessInfo> {
     let leader = process_info.leader()?;
+    if let Some(process) = preferred_program.and_then(|preferred| {
+        process_info
+            .foreground_processes
+            .iter()
+            .find(|process| policy.same_program(preferred, process.program()))
+    }) {
+        return Some(process);
+    }
     let launched_process = leader.argv.as_deref().and_then(|arguments| {
         process_info
             .foreground_processes

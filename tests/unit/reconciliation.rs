@@ -108,6 +108,7 @@ fn snapshot(tabs: Vec<SessionTab>) -> SessionSnapshot {
         .map(|tab| PaneInfo {
             pane_id: format!("{}:pane", tab.tab.tab_id),
             tab_id: tab.tab.tab_id.clone(),
+            agent: None,
         })
         .collect();
     SessionSnapshot {
@@ -152,6 +153,7 @@ fn pane_selection_is_conservative_for_background_splits() {
     session.panes.push(PaneInfo {
         pane_id: "other".into(),
         tab_id: "w1:t1".into(),
+        agent: None,
     });
     assert_eq!(naming_pane(&session, &split), None);
 
@@ -218,7 +220,9 @@ fn a_non_shell_child_wins_over_a_shell_script_group_leader() {
         ],
     };
     assert_eq!(
-        representative_process(&info, &policy).unwrap().program(),
+        representative_process(&info, &policy, None)
+            .unwrap()
+            .program(),
         "opencode"
     );
 }
@@ -244,8 +248,51 @@ fn a_launched_binary_wins_over_its_node_launcher() {
         ],
     };
     assert_eq!(
-        representative_process(&info, &policy).unwrap().program(),
+        representative_process(&info, &policy, None)
+            .unwrap()
+            .program(),
         "codex"
+    );
+}
+
+#[test]
+fn a_recognized_agent_wins_over_its_descendant_processes() {
+    let policy = naming_policy(&Settings::default());
+    let info = PaneProcessInfo {
+        foreground_process_group_id: Some(7),
+        foreground_processes: vec![
+            ProcessInfo {
+                pid: 10,
+                name: "Python".into(),
+                argv0: Some("Python".into()),
+                argv: Some(vec!["Python".into(), "run-host.py".into()]),
+            },
+            ProcessInfo {
+                pid: 9,
+                name: "bash".into(),
+                argv0: Some("bash".into()),
+                argv: Some(vec!["bash".into(), "run-with-ui.sh".into()]),
+            },
+            ProcessInfo {
+                pid: 8,
+                name: "opencode".into(),
+                argv0: Some("opencode".into()),
+                argv: Some(vec!["opencode".into()]),
+            },
+            ProcessInfo {
+                pid: 7,
+                name: "zsh".into(),
+                argv0: Some("zsh".into()),
+                argv: Some(vec!["zsh".into(), "opencode-env".into()]),
+            },
+        ],
+    };
+
+    assert_eq!(
+        representative_process(&info, &policy, Some("opencode"))
+            .unwrap()
+            .program(),
+        "opencode"
     );
 }
 
@@ -1020,6 +1067,7 @@ fn focusing_a_pane_updates_an_owned_tab_from_the_active_pane() {
     session.panes.push(PaneInfo {
         pane_id: "w1:t1:other".into(),
         tab_id: "w1:t1".into(),
+        agent: None,
     });
     session.focused_pane_id = Some("w1:t1:other".into());
     let mut client = FakeClient::new(session, &[("w1:t1:pane", "nvim"), ("w1:t1:other", "cargo")]);
