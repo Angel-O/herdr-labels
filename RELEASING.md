@@ -20,25 +20,31 @@ distributions.
    scripts/test-install.sh
    ```
 
-3. Open and review the release pull request. Do not merge a manifest that
-   references a release that does not exist yet.
+3. Open and review the release pull request, then merge it with a merge commit
+   so the reviewed release commit remains in `main` history. Do not squash the
+   release pull request.
 
 ## Publish Assets
 
-From the reviewed release commit, create and push an annotated version tag:
+Update local `main`, then create and push an annotated version tag from the
+release pull request's merge commit:
 
 ```bash
+set -euo pipefail
+git switch main
+git pull --ff-only origin main
+merge_commit="$(gh pr view <release-pr-number> --json mergeCommit --jq '.mergeCommit.oid')"
+test "$(git rev-parse HEAD)" = "$merge_commit"
 version="$(scripts/check-version.sh)"
-git tag -a "v$version" -m "v$version"
+git tag -a "v$version" "$merge_commit" -m "v$version"
 git push origin "v$version"
 ```
 
 The release workflow validates the tag, creates a draft release, builds all four
 targets, uploads their checksums, and publishes only after every build succeeds.
-If any target fails, the release remains a draft and the pull request must not be
-merged.
+If any target fails, the release remains a draft.
 
-## Verify And Merge
+## Verify
 
 1. Confirm the GitHub Release is published and contains four binaries plus
    `SHA256SUMS`.
@@ -50,4 +56,3 @@ merged.
 
 3. Verify startup reconciliation, automatic process naming, manual-name opt-out,
    reset/clear actions, and tab creation, deletion, reordering, and renaming.
-4. Merge the release pull request only after installation succeeds.
