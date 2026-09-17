@@ -108,6 +108,13 @@ fn close_and_focus_events_have_precise_invocations() {
             tab_id: "w1:t2".into()
         }
     );
+    assert_eq!(
+        event_invocation(Some("pane.exited"), Some("w1".into()), Some("w1:t2".into())),
+        Invocation::Tab {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t2".into()
+        }
+    );
 }
 
 #[test]
