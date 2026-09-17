@@ -1087,6 +1087,38 @@ fn focusing_a_pane_updates_an_owned_tab_from_the_active_pane() {
 }
 
 #[test]
+fn closing_a_focused_pane_updates_an_owned_tab_from_the_survivor() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: "nvim".into(),
+            last_rendered: "[1] nvim".into(),
+        },
+    );
+    let mut surviving = tab("w1:t1", "w1", "[1] nvim", true);
+    surviving.pane_count = 1;
+    let mut session = snapshot(vec![surviving]);
+    session.panes[0].pane_id = "w1:t1:survivor".into();
+    let mut client = FakeClient::new(session, &[("w1:t1:survivor", "cargo")]);
+    let closed = config(
+        &directory,
+        Invocation::Tab {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t1".into(),
+        },
+    );
+
+    run_pass(&closed, &closed.invocation, &mut client).unwrap();
+
+    assert_eq!(client.renamed, [("w1:t1".into(), "[1] cargo".into())]);
+    assert!(matches!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(TabOwnership::Owned { last_base, .. }) if last_base == "cargo"
+    ));
+}
+
+#[test]
 fn preexec_applies_only_while_that_program_is_foreground() {
     let directory = TestDir::new();
     let owned = || TabOwnership::Owned {
