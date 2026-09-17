@@ -199,7 +199,7 @@ fn event_invocation(
             workspace_id,
             tab_id,
         },
-        Some("tab.created" | "tab.moved" | "pane.created" | "pane.exited") => {
+        Some("tab.created" | "tab.moved" | "pane.created") => {
             workspace_id.map_or(Invocation::Full, Invocation::Workspace)
         }
         Some("pane.moved") => Invocation::Full,
@@ -211,15 +211,17 @@ fn event_invocation(
             (Some(workspace_id), None) => Invocation::Workspace(workspace_id),
             _ => Invocation::Full,
         },
-        // After a pane closes, the surviving pane supplies the tab's name.
-        Some("tab.focused" | "pane.focused" | "pane.closed") => match (workspace_id, tab_id) {
-            (Some(workspace_id), Some(tab_id)) => Invocation::Tab {
-                workspace_id,
-                tab_id,
-            },
-            (Some(workspace_id), None) => Invocation::Workspace(workspace_id),
-            _ => Invocation::Full,
-        },
+        // After a pane closes or exits, the surviving pane supplies the tab's name.
+        Some("tab.focused" | "pane.focused" | "pane.closed" | "pane.exited") => {
+            match (workspace_id, tab_id) {
+                (Some(workspace_id), Some(tab_id)) => Invocation::Tab {
+                    workspace_id,
+                    tab_id,
+                },
+                (Some(workspace_id), None) => Invocation::Workspace(workspace_id),
+                _ => Invocation::Full,
+            }
+        }
         _ => Invocation::Full,
     }
 }
