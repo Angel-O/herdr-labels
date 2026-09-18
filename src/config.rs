@@ -211,8 +211,8 @@ fn event_invocation(
             (Some(workspace_id), None) => Invocation::Workspace(workspace_id),
             _ => Invocation::Full,
         },
-        // After layout removal, the surviving pane supplies the tab's name.
-        Some("tab.focused" | "pane.focused" | "pane.closed" | "layout.updated") => {
+        // After a pane closes or exits, the surviving pane supplies the tab's name.
+        Some("tab.focused" | "pane.focused" | "pane.closed" | "pane.exited") => {
             match (workspace_id, tab_id) {
                 (Some(workspace_id), Some(tab_id)) => Invocation::Tab {
                     workspace_id,

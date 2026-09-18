@@ -40,15 +40,15 @@ on = "pane.created"
 command = ["target/release/herdr-labels"]
 
 [[events]]
+on = "pane.exited"
+command = ["target/release/herdr-labels"]
+
+[[events]]
 on = "pane.focused"
 command = ["target/release/herdr-labels"]
 
 [[events]]
 on = "pane.moved"
-command = ["target/release/herdr-labels"]
-
-[[events]]
-on = "layout.updated"
 command = ["target/release/herdr-labels"]
 
 [[actions]]

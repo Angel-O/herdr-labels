@@ -1119,21 +1119,21 @@ fn closing_a_focused_pane_updates_an_owned_tab_from_the_survivor() {
 }
 
 #[test]
-fn layout_update_refreshes_an_owned_tab_from_the_surviving_pane() {
+fn exiting_a_focused_pane_updates_an_owned_tab_from_the_survivor() {
     let directory = TestDir::new();
     set_ownership(
         &directory,
         TabOwnership::Owned {
-            last_base: "ai board".into(),
-            last_rendered: "[1] ai board".into(),
+            last_base: "nvim".into(),
+            last_rendered: "[1] nvim".into(),
         },
     );
-    let mut surviving = tab("w1:t1", "w1", "[1] ai board", false);
+    let mut surviving = tab("w1:t1", "w1", "[1] nvim", true);
     surviving.pane_count = 1;
     let mut session = snapshot(vec![surviving]);
     session.panes[0].pane_id = "w1:t1:survivor".into();
-    let mut client = FakeClient::new(session, &[("w1:t1:survivor", "zsh")]);
-    let layout_updated = config(
+    let mut client = FakeClient::new(session, &[("w1:t1:survivor", "cargo")]);
+    let exited = config(
         &directory,
         Invocation::Tab {
             workspace_id: "w1".into(),
@@ -1141,12 +1141,12 @@ fn layout_update_refreshes_an_owned_tab_from_the_surviving_pane() {
         },
     );
 
-    run_pass(&layout_updated, &layout_updated.invocation, &mut client).unwrap();
+    run_pass(&exited, &exited.invocation, &mut client).unwrap();
 
-    assert_eq!(client.renamed, [("w1:t1".into(), "[1] zsh".into())]);
+    assert_eq!(client.renamed, [("w1:t1".into(), "[1] cargo".into())]);
     assert!(matches!(
         State::load(&directory.0).unwrap().ownership("w1:t1"),
-        Some(TabOwnership::Owned { last_base, .. }) if last_base == "zsh"
+        Some(TabOwnership::Owned { last_base, .. }) if last_base == "cargo"
     ));
 }
 

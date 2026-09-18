@@ -27,13 +27,12 @@ fn naming_lifecycle_events_are_subscribed() {
     for event in [
         "tab.focused",
         "pane.created",
+        "pane.exited",
         "pane.focused",
         "pane.moved",
-        "layout.updated",
     ] {
         assert!(MANIFEST.contains(&format!("on = \"{event}\"")));
     }
-    assert!(!MANIFEST.contains("on = \"pane.exited\""));
 }
 
 #[test]
