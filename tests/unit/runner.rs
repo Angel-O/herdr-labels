@@ -67,10 +67,10 @@ impl TabClient for FakeClient {
         if self.snapshots == 1
             && let Some(state_dir) = &self.rerun_on_first_snapshot
         {
-            ReconciliationLock::request_rerun(state_dir)?;
+            ReconciliationLock::request_rerun(state_dir, &Invocation::Full)?;
         }
         if let Some(state_dir) = &self.rerun_on_every_snapshot {
-            ReconciliationLock::request_rerun(state_dir)?;
+            ReconciliationLock::request_rerun(state_dir, &Invocation::Full)?;
         }
         Ok(SessionSnapshot {
             focused_pane_id: None,
@@ -254,7 +254,7 @@ fn handoff_uses_only_the_remaining_process_pass_budget() {
     let config = config(&directory, Invocation::Full);
     let mut client = FakeClient::with_tab(None);
     client.rerun_on_every_snapshot = Some(directory.0.clone());
-    ReconciliationLock::request_rerun(&directory.0).unwrap();
+    ReconciliationLock::request_rerun(&directory.0, &Invocation::Full).unwrap();
     let mut remaining_passes = 2;
 
     handoff_after_release(&config, &mut client, &mut remaining_passes).unwrap();
@@ -262,6 +262,31 @@ fn handoff_uses_only_the_remaining_process_pass_budget() {
     assert_eq!(client.snapshots, 2);
     assert_eq!(remaining_passes, 0);
     assert!(ReconciliationLock::rerun_requested(&directory.0).unwrap());
+}
+
+#[test]
+fn successful_handoff_executes_all_pending_requesters() {
+    let directory = TestDir::new();
+    let config = config(&directory, Invocation::Full);
+    let mut client = FakeClient::with_tab(None);
+    let first = Invocation::ClosedPane {
+        workspace_id: "w1".into(),
+        pane_id: "w1:p1".into(),
+    };
+    let second = Invocation::ClosedPane {
+        workspace_id: "w2".into(),
+        pane_id: "w2:p1".into(),
+    };
+    ReconciliationLock::request_rerun(&directory.0, &first).unwrap();
+    ReconciliationLock::request_rerun(&directory.0, &Invocation::Full).unwrap();
+    ReconciliationLock::request_rerun(&directory.0, &second).unwrap();
+    let mut remaining_passes = 4;
+
+    handoff_after_release(&config, &mut client, &mut remaining_passes).unwrap();
+
+    assert_eq!(client.snapshots, 3);
+    assert_eq!(remaining_passes, 1);
+    assert!(!ReconciliationLock::rerun_requested(&directory.0).unwrap());
 }
 
 #[test]

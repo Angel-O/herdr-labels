@@ -12,6 +12,8 @@ use crate::state::{State, TabOwnership};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+const CLOSED_PANE_PROCESS_ATTEMPTS: usize = 5;
+
 pub(crate) trait TabClient {
     fn snapshot(&mut self) -> Result<SessionSnapshot>;
     fn get_tab(&mut self, tab_id: &str) -> Result<Option<Tab>>;
@@ -221,6 +223,7 @@ fn reconcile_tab(
     let observes_process = matches!(
         invocation,
         Invocation::Tab { .. }
+            | Invocation::ClosedPane { .. }
             | Invocation::Init { .. }
             | Invocation::Preexec { .. }
             | Invocation::Precmd { .. }
@@ -374,14 +377,19 @@ fn computed_name(
             let Some(pane_id) = naming_pane(snapshot, tab) else {
                 return Ok(None);
             };
-            let Ok(process_info) = client.pane_process_info(pane_id) else {
-                return Ok(None);
-            };
             let preferred_program = snapshot
                 .panes
                 .iter()
                 .find(|pane| pane.pane_id == pane_id)
                 .and_then(|pane| pane.agent.as_deref());
+            let process_info = if matches!(invocation, Invocation::ClosedPane { .. }) {
+                closed_pane_process_info(client, pane_id, policy, preferred_program)?
+            } else {
+                client.pane_process_info(pane_id).ok()
+            };
+            let Some(process_info) = process_info else {
+                return Ok(None);
+            };
             let Some(process) = representative_process(&process_info, policy, preferred_program)
             else {
                 return Ok(None);
@@ -405,6 +413,30 @@ fn computed_name(
             ))
         }
     }
+}
+
+fn closed_pane_process_info(
+    client: &mut impl TabClient,
+    pane_id: &str,
+    policy: &NamingPolicy,
+    preferred_program: Option<&str>,
+) -> Result<Option<PaneProcessInfo>> {
+    for attempt in 0..CLOSED_PANE_PROCESS_ATTEMPTS {
+        let Ok(process_info) = client.pane_process_info(pane_id) else {
+            if attempt + 1 < CLOSED_PANE_PROCESS_ATTEMPTS {
+                std::thread::yield_now();
+                continue;
+            }
+            return Ok(None);
+        };
+        if representative_process(&process_info, policy, preferred_program).is_some() {
+            return Ok(Some(process_info));
+        }
+        if attempt + 1 < CLOSED_PANE_PROCESS_ATTEMPTS {
+            std::thread::yield_now();
+        }
+    }
+    Ok(None)
 }
 
 fn process_group_matches_program(
@@ -494,6 +526,7 @@ fn scoped_tabs<'a>(snapshot: &'a SessionSnapshot, invocation: &Invocation) -> Ve
     }
     let (workspace, tab) = match invocation {
         Invocation::Workspace(workspace_id)
+        | Invocation::ClosedPane { workspace_id, .. }
         | Invocation::ClosedTab {
             workspace_id: Some(workspace_id),
             ..
