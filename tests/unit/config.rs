@@ -84,7 +84,12 @@ fn toggle_uses_the_current_plugin_context() {
 #[test]
 fn close_and_focus_events_have_precise_invocations() {
     assert_eq!(
-        event_invocation(Some("tab.closed"), Some("w1".into()), Some("w1:t2".into())),
+        event_invocation(
+            Some("tab.closed"),
+            Some("w1".into()),
+            Some("w1:t2".into()),
+            None
+        ),
         Invocation::ClosedTab {
             workspace_id: Some("w1".into()),
             tab_id: Some("w1:t2".into())
@@ -94,7 +99,8 @@ fn close_and_focus_events_have_precise_invocations() {
         event_invocation(
             Some("pane.focused"),
             Some("w1".into()),
-            Some("w1:t2".into())
+            Some("w1:t2".into()),
+            None
         ),
         Invocation::Tab {
             workspace_id: "w1".into(),
@@ -102,17 +108,28 @@ fn close_and_focus_events_have_precise_invocations() {
         }
     );
     assert_eq!(
-        event_invocation(Some("pane.closed"), Some("w1".into()), Some("w1:t2".into())),
+        event_invocation(
+            Some("pane.closed"),
+            Some("w1".into()),
+            Some("w1:t2".into()),
+            None
+        ),
         Invocation::Tab {
             workspace_id: "w1".into(),
             tab_id: "w1:t2".into()
         }
     );
     assert_eq!(
-        event_invocation(Some("pane.exited"), Some("w1".into()), Some("w1:t2".into())),
-        Invocation::Tab {
+        event_invocation(
+            Some("pane.exited"),
+            Some("w1".into()),
+            Some("w1:t2".into()),
+            Some("w1:p2".into())
+        ),
+        Invocation::ExitedPane {
             workspace_id: "w1".into(),
-            tab_id: "w1:t2".into()
+            tab_id: "w1:t2".into(),
+            pane_id: "w1:p2".into()
         }
     );
 }
@@ -120,7 +137,12 @@ fn close_and_focus_events_have_precise_invocations() {
 #[test]
 fn rename_events_are_distinct_from_focus_refreshes() {
     assert_eq!(
-        event_invocation(Some("tab.renamed"), Some("w1".into()), Some("w1:t2".into())),
+        event_invocation(
+            Some("tab.renamed"),
+            Some("w1".into()),
+            Some("w1:t2".into()),
+            None
+        ),
         Invocation::RenamedTab {
             workspace_id: "w1".into(),
             tab_id: "w1:t2".into()
@@ -134,7 +156,8 @@ fn pane_moves_reconcile_source_and_destination_through_a_full_pass() {
         event_invocation(
             Some("pane.moved"),
             Some("destination".into()),
-            Some("destination:t1".into())
+            Some("destination:t1".into()),
+            None
         ),
         Invocation::Full
     );

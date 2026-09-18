@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
-use crate::herdr::{PaneProcessInfo, SessionSnapshot};
+use crate::herdr::{PaneInfo, PaneProcessInfo, SessionSnapshot};
 use crate::numbering::Tab;
 use crate::settings::Settings;
 
@@ -34,6 +34,7 @@ struct FakeClient {
     fallback_tab: Option<Tab>,
     tab_reads: usize,
     snapshots: usize,
+    snapshot_panes: VecDeque<Vec<PaneInfo>>,
     rerun_on_first_snapshot: Option<PathBuf>,
     rerun_on_every_snapshot: Option<PathBuf>,
 }
@@ -55,6 +56,7 @@ impl FakeClient {
             fallback_tab: tab,
             tab_reads: 0,
             snapshots: 0,
+            snapshot_panes: VecDeque::new(),
             rerun_on_first_snapshot: None,
             rerun_on_every_snapshot: None,
         }
@@ -75,7 +77,7 @@ impl TabClient for FakeClient {
         Ok(SessionSnapshot {
             focused_pane_id: None,
             tabs: Vec::new(),
-            panes: Vec::new(),
+            panes: self.snapshot_panes.pop_front().unwrap_or_default(),
         })
     }
 
@@ -154,6 +156,14 @@ fn process_info(program: &str) -> PaneProcessInfo {
             argv0: Some(program.into()),
             argv: None,
         }],
+    }
+}
+
+fn pane(pane_id: &str) -> PaneInfo {
+    PaneInfo {
+        pane_id: pane_id.into(),
+        tab_id: "w1:t1".into(),
+        agent: None,
     }
 }
 
@@ -396,6 +406,34 @@ fn close_settling_stops_when_its_deadline_is_exhausted() {
 
     assert!(error.to_string().contains("remained visible"));
     assert_eq!(client.tab_reads, 1);
+}
+
+#[test]
+fn pane_exit_settling_waits_for_the_exiting_pane_to_disappear() {
+    let mut client = FakeClient::with_tab(None);
+    client.snapshot_panes = VecDeque::from([vec![pane("exiting")], Vec::new()]);
+
+    wait_until_pane_exited(
+        &mut client,
+        "exiting",
+        Duration::from_millis(1),
+        Duration::ZERO,
+    )
+    .unwrap();
+
+    assert_eq!(client.snapshots, 2);
+}
+
+#[test]
+fn pane_exit_settling_stops_when_its_deadline_is_exhausted() {
+    let mut client = FakeClient::with_tab(None);
+    client.snapshot_panes = VecDeque::from([vec![pane("exiting")]]);
+
+    let error =
+        wait_until_pane_exited(&mut client, "exiting", Duration::ZERO, Duration::ZERO).unwrap_err();
+
+    assert!(error.to_string().contains("remained visible"));
+    assert_eq!(client.snapshots, 1);
 }
 
 #[test]
