@@ -1135,9 +1135,10 @@ fn exiting_a_focused_pane_updates_an_owned_tab_from_the_survivor() {
     let mut client = FakeClient::new(session, &[("w1:t1:survivor", "cargo")]);
     let exited = config(
         &directory,
-        Invocation::Tab {
+        Invocation::ExitedPane {
             workspace_id: "w1".into(),
             tab_id: "w1:t1".into(),
+            pane_id: "w1:t1:exited".into(),
         },
     );
 

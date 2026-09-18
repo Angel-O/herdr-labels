@@ -37,6 +37,14 @@ pub(crate) fn run(config: Config) -> Result<()> {
     {
         wait_until_closed(&mut client, tab_id, CLOSE_SETTLE_TIMEOUT, CLOSE_RETRY_DELAY)?;
     }
+    if let Invocation::ExitedPane { pane_id, .. } = &config.invocation {
+        wait_until_pane_exited(
+            &mut client,
+            pane_id,
+            CLOSE_SETTLE_TIMEOUT,
+            CLOSE_RETRY_DELAY,
+        )?;
+    }
     if matches!(config.invocation, Invocation::Preexec { .. }) {
         let Some(probe) = ReconciliationLock::try_acquire(&config.state_dir)? else {
             return Ok(());
@@ -110,9 +118,10 @@ pub(crate) fn run(config: Config) -> Result<()> {
 fn exact_lock_timeout(invocation: &Invocation) -> Option<Duration> {
     match invocation {
         Invocation::Init { .. } => Some(INIT_LOCK_TIMEOUT),
-        Invocation::Tab { .. } | Invocation::Preexec { .. } | Invocation::Precmd { .. } => {
-            Some(SHELL_LOCK_TIMEOUT)
-        }
+        Invocation::Tab { .. }
+        | Invocation::ExitedPane { .. }
+        | Invocation::Preexec { .. }
+        | Invocation::Precmd { .. } => Some(SHELL_LOCK_TIMEOUT),
         Invocation::Clear | Invocation::Reset { .. } | Invocation::Toggle { .. } => {
             Some(ACTION_LOCK_TIMEOUT)
         }
@@ -124,6 +133,7 @@ fn timeout_is_benign(invocation: &Invocation) -> bool {
     matches!(
         invocation,
         Invocation::Tab { .. }
+            | Invocation::ExitedPane { .. }
             | Invocation::Init { .. }
             | Invocation::Preexec { .. }
             | Invocation::Precmd { .. }
@@ -229,6 +239,40 @@ fn wait_until_closed(
     Err(std::io::Error::new(
         std::io::ErrorKind::TimedOut,
         format!("tab {tab_id} remained visible after its close event"),
+    )
+    .into())
+}
+
+fn wait_until_pane_exited(
+    client: &mut impl TabClient,
+    pane_id: &str,
+    timeout: Duration,
+    retry_delay: Duration,
+) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    let mut first_snapshot = true;
+    loop {
+        if !first_snapshot && Instant::now() >= deadline {
+            break;
+        }
+        first_snapshot = false;
+        if !client
+            .snapshot()?
+            .panes
+            .iter()
+            .any(|pane| pane.pane_id == pane_id)
+        {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        thread::sleep(retry_delay.min(remaining));
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("pane {pane_id} remained visible after its exit event"),
     )
     .into())
 }
