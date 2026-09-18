@@ -221,6 +221,7 @@ fn reconcile_tab(
     let observes_process = matches!(
         invocation,
         Invocation::Tab { .. }
+            | Invocation::ClosedPane { .. }
             | Invocation::Init { .. }
             | Invocation::Preexec { .. }
             | Invocation::Precmd { .. }
@@ -494,6 +495,7 @@ fn scoped_tabs<'a>(snapshot: &'a SessionSnapshot, invocation: &Invocation) -> Ve
     }
     let (workspace, tab) = match invocation {
         Invocation::Workspace(workspace_id)
+        | Invocation::ClosedPane { workspace_id, .. }
         | Invocation::ClosedTab {
             workspace_id: Some(workspace_id),
             ..

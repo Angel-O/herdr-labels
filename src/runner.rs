@@ -83,26 +83,23 @@ pub(crate) fn run(config: Config) -> Result<()> {
         return handoff_after_release(&config, &mut client, &mut remaining_passes);
     }
 
+    let mut handoff = None;
     let lock = match ReconciliationLock::try_acquire(&config.state_dir)? {
         Some(lock) => lock,
         None => {
             if is_owned_rename_event(&config, &mut client)? {
                 return Ok(());
             }
-            ReconciliationLock::request_rerun(&config.state_dir)?;
+            ReconciliationLock::request_rerun(&config.state_dir, &config.invocation)?;
             let Some(lock) = ReconciliationLock::try_acquire(&config.state_dir)? else {
                 return Ok(());
             };
-            ReconciliationLock::take_rerun(&config.state_dir)?;
+            handoff = ReconciliationLock::take_rerun(&config.state_dir)?;
             lock
         }
     };
-    run_coalesced_passes(
-        &config,
-        &config.invocation,
-        &mut client,
-        &mut remaining_passes,
-    )?;
+    let initial = handoff.as_ref().unwrap_or(&config.invocation);
+    run_coalesced_passes(&config, initial, &mut client, &mut remaining_passes)?;
     drop(lock);
     handoff_after_release(&config, &mut client, &mut remaining_passes)
 }
@@ -165,8 +162,10 @@ fn handoff_after_release(
     let Some(lock) = ReconciliationLock::try_acquire(&config.state_dir)? else {
         return Ok(());
     };
-    ReconciliationLock::take_rerun(&config.state_dir)?;
-    run_coalesced_passes(config, &Invocation::Full, client, remaining_passes)?;
+    let Some(requested) = ReconciliationLock::take_rerun(&config.state_dir)? else {
+        return Ok(());
+    };
+    run_coalesced_passes(config, &requested, client, remaining_passes)?;
     drop(lock);
     Ok(())
 }
@@ -192,7 +191,8 @@ fn run_coalesced_passes(
     client: &mut impl TabClient,
     remaining_passes: &mut usize,
 ) -> Result<()> {
-    let mut invocation = initial;
+    let mut deferred = initial.clone();
+    let mut invocation = &deferred;
     while *remaining_passes > 0 {
         *remaining_passes -= 1;
         run_pass(config, invocation, client)?;
@@ -201,10 +201,11 @@ fn run_coalesced_passes(
             // extending this process through another unbounded batch.
             break;
         }
-        if !ReconciliationLock::take_rerun(&config.state_dir)? {
+        let Some(requested) = ReconciliationLock::take_rerun(&config.state_dir)? else {
             break;
-        }
-        invocation = &Invocation::Full;
+        };
+        deferred = requested;
+        invocation = &deferred;
     }
     Ok(())
 }
