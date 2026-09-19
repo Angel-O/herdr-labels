@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
-use crate::herdr::{PaneProcessInfo, SessionSnapshot};
+use crate::herdr::{PaneInfo, PaneProcessInfo, SessionSnapshot, SessionTab};
 use crate::numbering::Tab;
 use crate::settings::Settings;
 
@@ -46,6 +46,17 @@ struct ProcessClient {
 
 struct FailingProcessClient {
     observations: usize,
+}
+
+struct ClosedPaneReadinessClient {
+    snapshot: SessionSnapshot,
+    ready_snapshot: Option<SessionSnapshot>,
+    current: Tab,
+    delayed_pane: String,
+    ready_at: Instant,
+    snapshots: usize,
+    process_queries: usize,
+    renamed: Vec<(String, String)>,
 }
 
 impl FakeClient {
@@ -137,11 +148,60 @@ impl TabClient for FailingProcessClient {
     }
 }
 
+impl TabClient for ClosedPaneReadinessClient {
+    fn snapshot(&mut self) -> Result<SessionSnapshot> {
+        self.snapshots += 1;
+        if Instant::now() >= self.ready_at
+            && let Some(snapshot) = &self.ready_snapshot
+        {
+            return Ok(snapshot.clone());
+        }
+        Ok(self.snapshot.clone())
+    }
+
+    fn get_tab(&mut self, _tab_id: &str) -> Result<Option<Tab>> {
+        Ok(Some(self.current.clone()))
+    }
+
+    fn rename_tab(&mut self, tab_id: &str, label: &str) -> Result<()> {
+        self.renamed.push((tab_id.into(), label.into()));
+        self.current.label = label.into();
+        Ok(())
+    }
+
+    fn pane_process_info(&mut self, pane_id: &str) -> Result<PaneProcessInfo> {
+        self.process_queries += 1;
+        if pane_id == self.delayed_pane && Instant::now() < self.ready_at {
+            return Ok(PaneProcessInfo {
+                foreground_process_group_id: Some(7),
+                foreground_processes: Vec::new(),
+            });
+        }
+        Ok(process_info("zsh"))
+    }
+}
+
 fn tab(label: &str) -> Tab {
     Tab {
         tab_id: "w1:t1".into(),
         workspace_id: "w1".into(),
         label: label.into(),
+    }
+}
+
+fn closed_pane_snapshot() -> SessionSnapshot {
+    SessionSnapshot {
+        focused_pane_id: None,
+        tabs: vec![SessionTab {
+            tab: tab("[1] ai board"),
+            focused: false,
+            pane_count: 1,
+        }],
+        panes: vec![PaneInfo {
+            pane_id: "w1:t1:survivor".into(),
+            tab_id: "w1:t1".into(),
+            agent: None,
+        }],
     }
 }
 
@@ -265,6 +325,161 @@ fn handoff_uses_only_the_remaining_process_pass_budget() {
 }
 
 #[test]
+fn closed_pane_settling_waits_for_elapsed_survivor_readiness() {
+    let directory = TestDir::new();
+    let mut state = State::load(&directory.0).unwrap();
+    state.set_ownership(
+        "w1:t1",
+        TabOwnership::Owned {
+            last_base: "ai board".into(),
+            last_rendered: "[1] ai board".into(),
+        },
+    );
+    state.persist().unwrap();
+    let invocation = Invocation::ClosedPane {
+        workspace_id: "w1".into(),
+        pane_id: "w1:t1:closed".into(),
+    };
+    let config = config(&directory, invocation);
+    let ready_at = Instant::now() + Duration::from_millis(50);
+    let mut client = ClosedPaneReadinessClient {
+        snapshot: closed_pane_snapshot(),
+        ready_snapshot: None,
+        current: tab("[1] ai board"),
+        delayed_pane: "w1:t1:survivor".into(),
+        ready_at,
+        snapshots: 0,
+        process_queries: 0,
+        renamed: Vec::new(),
+    };
+    let mut remaining_passes = 1;
+
+    run_coalesced_passes(
+        &config,
+        &config.invocation,
+        &mut client,
+        &mut remaining_passes,
+    )
+    .unwrap();
+
+    assert!(Instant::now() >= ready_at);
+    assert!(client.snapshots >= 3);
+    assert!(client.process_queries >= 2);
+    assert_eq!(client.renamed, [("w1:t1".into(), "[1] zsh".into())]);
+}
+
+#[test]
+fn closed_pane_settling_waits_for_delayed_survivor_selectability() {
+    let directory = TestDir::new();
+    let mut state = State::load(&directory.0).unwrap();
+    state.set_ownership(
+        "w1:t1",
+        TabOwnership::Owned {
+            last_base: "ai board".into(),
+            last_rendered: "[1] ai board".into(),
+        },
+    );
+    state.persist().unwrap();
+    let invocation = Invocation::ClosedPane {
+        workspace_id: "w1".into(),
+        pane_id: "w1:t1:closed".into(),
+    };
+    let config = config(&directory, invocation);
+    let ready_at = Instant::now() + Duration::from_millis(50);
+    let initial_snapshot = SessionSnapshot {
+        focused_pane_id: None,
+        tabs: vec![
+            SessionTab {
+                tab: tab("[1] ai board"),
+                focused: false,
+                pane_count: 2,
+            },
+            SessionTab {
+                tab: Tab {
+                    tab_id: "w1:t2".into(),
+                    workspace_id: "w1".into(),
+                    label: "[2] zsh".into(),
+                },
+                focused: false,
+                pane_count: 1,
+            },
+        ],
+        panes: vec![
+            PaneInfo {
+                pane_id: "w1:t1:survivor".into(),
+                tab_id: "w1:t1".into(),
+                agent: None,
+            },
+            PaneInfo {
+                pane_id: "w1:t1:closing".into(),
+                tab_id: "w1:t1".into(),
+                agent: None,
+            },
+            PaneInfo {
+                pane_id: "w1:t2:ready".into(),
+                tab_id: "w1:t2".into(),
+                agent: None,
+            },
+        ],
+    };
+    let ready_snapshot = SessionSnapshot {
+        focused_pane_id: None,
+        tabs: vec![
+            SessionTab {
+                tab: tab("[1] ai board"),
+                focused: false,
+                pane_count: 1,
+            },
+            SessionTab {
+                tab: Tab {
+                    tab_id: "w1:t2".into(),
+                    workspace_id: "w1".into(),
+                    label: "[2] zsh".into(),
+                },
+                focused: false,
+                pane_count: 1,
+            },
+        ],
+        panes: vec![
+            PaneInfo {
+                pane_id: "w1:t1:survivor".into(),
+                tab_id: "w1:t1".into(),
+                agent: None,
+            },
+            PaneInfo {
+                pane_id: "w1:t2:ready".into(),
+                tab_id: "w1:t2".into(),
+                agent: None,
+            },
+        ],
+    };
+    let mut client = ClosedPaneReadinessClient {
+        snapshot: initial_snapshot,
+        ready_snapshot: Some(ready_snapshot),
+        current: tab("[1] ai board"),
+        delayed_pane: "w1:t1:survivor".into(),
+        ready_at,
+        snapshots: 0,
+        process_queries: 0,
+        renamed: Vec::new(),
+    };
+    let mut remaining_passes = 1;
+
+    run_coalesced_passes(
+        &config,
+        &config.invocation,
+        &mut client,
+        &mut remaining_passes,
+    )
+    .unwrap();
+
+    assert!(Instant::now() >= ready_at);
+    assert!(client.snapshots >= 3);
+    assert!(client.process_queries >= 2);
+    assert_eq!(client.renamed, [("w1:t1".into(), "[1] zsh".into())]);
+}
+
+#[test]
 fn successful_handoff_executes_all_pending_requesters() {
     let directory = TestDir::new();
     let config = config(&directory, Invocation::Full);
@@ -284,7 +499,7 @@ fn successful_handoff_executes_all_pending_requesters() {
 
     handoff_after_release(&config, &mut client, &mut remaining_passes).unwrap();
 
-    assert_eq!(client.snapshots, 3);
+    assert_eq!(client.snapshots, 5);
     assert_eq!(remaining_passes, 1);
     assert!(!ReconciliationLock::rerun_requested(&directory.0).unwrap());
 }

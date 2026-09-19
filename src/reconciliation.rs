@@ -12,8 +12,6 @@ use crate::state::{State, TabOwnership};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-const CLOSED_PANE_PROCESS_ATTEMPTS: usize = 5;
-
 pub(crate) trait TabClient {
     fn snapshot(&mut self) -> Result<SessionSnapshot>;
     fn get_tab(&mut self, tab_id: &str) -> Result<Option<Tab>>;
@@ -112,6 +110,42 @@ pub(crate) fn pane_matches_program(
         program,
         &naming_policy(settings),
     ))
+}
+
+/// Checks one post-close snapshot for a selectable, observable survivor.
+pub(crate) fn closed_pane_ready(
+    client: &mut impl TabClient,
+    invocation: &Invocation,
+    settings: &Settings,
+) -> Result<bool> {
+    if !matches!(invocation, Invocation::ClosedPane { .. }) {
+        return Ok(true);
+    }
+    let snapshot = client.snapshot()?;
+    let policy = naming_policy(settings);
+    let tabs = scoped_tabs(&snapshot, invocation);
+    if tabs.is_empty() {
+        return Ok(true);
+    }
+    let mut selected_pane = false;
+    for session_tab in tabs {
+        let Some(pane_id) = naming_pane(&snapshot, session_tab) else {
+            return Ok(false);
+        };
+        selected_pane = true;
+        let preferred_program = snapshot
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == pane_id)
+            .and_then(|pane| pane.agent.as_deref());
+        let Ok(process_info) = client.pane_process_info(pane_id) else {
+            return Ok(false);
+        };
+        if representative_process(&process_info, &policy, preferred_program).is_none() {
+            return Ok(false);
+        }
+    }
+    Ok(selected_pane)
 }
 
 fn clear_session(client: &mut impl TabClient, state: &mut State) -> Result<()> {
@@ -382,11 +416,7 @@ fn computed_name(
                 .iter()
                 .find(|pane| pane.pane_id == pane_id)
                 .and_then(|pane| pane.agent.as_deref());
-            let process_info = if matches!(invocation, Invocation::ClosedPane { .. }) {
-                closed_pane_process_info(client, pane_id, policy, preferred_program)?
-            } else {
-                client.pane_process_info(pane_id).ok()
-            };
+            let process_info = client.pane_process_info(pane_id).ok();
             let Some(process_info) = process_info else {
                 return Ok(None);
             };
@@ -413,30 +443,6 @@ fn computed_name(
             ))
         }
     }
-}
-
-fn closed_pane_process_info(
-    client: &mut impl TabClient,
-    pane_id: &str,
-    policy: &NamingPolicy,
-    preferred_program: Option<&str>,
-) -> Result<Option<PaneProcessInfo>> {
-    for attempt in 0..CLOSED_PANE_PROCESS_ATTEMPTS {
-        let Ok(process_info) = client.pane_process_info(pane_id) else {
-            if attempt + 1 < CLOSED_PANE_PROCESS_ATTEMPTS {
-                std::thread::yield_now();
-                continue;
-            }
-            return Ok(None);
-        };
-        if representative_process(&process_info, policy, preferred_program).is_some() {
-            return Ok(Some(process_info));
-        }
-        if attempt + 1 < CLOSED_PANE_PROCESS_ATTEMPTS {
-            std::thread::yield_now();
-        }
-    }
-    Ok(None)
 }
 
 fn process_group_matches_program(

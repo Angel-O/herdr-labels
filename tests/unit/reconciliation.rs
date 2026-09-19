@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -31,7 +30,6 @@ struct FakeClient {
     snapshot: SessionSnapshot,
     current: HashMap<String, Tab>,
     processes: HashMap<String, PaneProcessInfo>,
-    process_sequences: HashMap<String, VecDeque<PaneProcessInfo>>,
     renamed: Vec<(String, String)>,
 }
 
@@ -50,7 +48,6 @@ impl FakeClient {
             snapshot,
             current,
             processes,
-            process_sequences: HashMap::new(),
             renamed: Vec::new(),
         }
     }
@@ -74,11 +71,6 @@ impl TabClient for FakeClient {
     }
 
     fn pane_process_info(&mut self, pane_id: &str) -> Result<PaneProcessInfo> {
-        if let Some(sequence) = self.process_sequences.get_mut(pane_id)
-            && let Some(process_info) = sequence.pop_front()
-        {
-            return Ok(process_info);
-        }
         self.processes
             .get(pane_id)
             .cloned()
@@ -1109,48 +1101,6 @@ fn native_pane_close_refreshes_an_owned_split_without_focus_change() {
     let mut session = snapshot(vec![surviving]);
     session.panes[0].pane_id = "w1:t1:survivor".into();
     let mut client = FakeClient::new(session, &[("w1:t1:survivor", "zsh")]);
-    let closed = config(
-        &directory,
-        Invocation::ClosedPane {
-            workspace_id: "w1".into(),
-            pane_id: "w1:t1:closed".into(),
-        },
-    );
-
-    run_pass(&closed, &closed.invocation, &mut client).unwrap();
-
-    assert_eq!(client.renamed, [("w1:t1".into(), "[1] zsh".into())]);
-    assert!(matches!(
-        State::load(&directory.0).unwrap().ownership("w1:t1"),
-        Some(TabOwnership::Owned { last_base, .. }) if last_base == "zsh"
-    ));
-}
-
-#[test]
-fn native_pane_close_waits_for_an_unavailable_survivor_observation() {
-    let directory = TestDir::new();
-    set_ownership(
-        &directory,
-        TabOwnership::Owned {
-            last_base: "ai board".into(),
-            last_rendered: "[1] ai board".into(),
-        },
-    );
-    let mut surviving = tab("w1:t1", "w1", "[1] ai board", false);
-    surviving.pane_count = 1;
-    let mut session = snapshot(vec![surviving]);
-    session.panes[0].pane_id = "w1:t1:survivor".into();
-    let mut client = FakeClient::new(session, &[]);
-    client.process_sequences.insert(
-        "w1:t1:survivor".into(),
-        VecDeque::from([
-            PaneProcessInfo {
-                foreground_process_group_id: Some(7),
-                foreground_processes: Vec::new(),
-            },
-            process_info("zsh"),
-        ]),
-    );
     let closed = config(
         &directory,
         Invocation::ClosedPane {

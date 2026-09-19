@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use crate::config::{Config, Invocation};
 use crate::herdr::HerdrClient;
 use crate::lock::ReconciliationLock;
-use crate::reconciliation::{TabClient, pane_matches_program, run_pass};
+use crate::reconciliation::{TabClient, closed_pane_ready, pane_matches_program, run_pass};
 use crate::state::{State, TabOwnership};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -25,6 +25,8 @@ const PROGRAM_SETTLE_DELAYS: [Duration; 5] = [
     Duration::from_millis(150),
     Duration::from_millis(200),
 ];
+const CLOSED_PANE_SETTLE_TIMEOUT: Duration = Duration::from_millis(250);
+const CLOSED_PANE_SETTLE_DELAY: Duration = Duration::from_millis(25);
 const MAX_RECONCILIATION_PASSES: usize = 8;
 
 /// Runs one invocation, preserving exact operations and coalescing structural events.
@@ -195,6 +197,7 @@ fn run_coalesced_passes(
     let mut invocation = &deferred;
     while *remaining_passes > 0 {
         *remaining_passes -= 1;
+        settle_closed_pane(client, invocation, &config.settings)?;
         run_pass(config, invocation, client)?;
         if *remaining_passes == 0 {
             // Preserve a final marker for the next real event rather than
@@ -208,6 +211,27 @@ fn run_coalesced_passes(
         invocation = &deferred;
     }
     Ok(())
+}
+
+fn settle_closed_pane(
+    client: &mut impl TabClient,
+    invocation: &Invocation,
+    settings: &crate::settings::Settings,
+) -> Result<()> {
+    if !matches!(invocation, Invocation::ClosedPane { .. }) {
+        return Ok(());
+    }
+    let deadline = Instant::now() + CLOSED_PANE_SETTLE_TIMEOUT;
+    loop {
+        if closed_pane_ready(client, invocation, settings)? {
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        thread::sleep(CLOSED_PANE_SETTLE_DELAY.min(remaining));
+    }
 }
 
 fn wait_until_closed(
