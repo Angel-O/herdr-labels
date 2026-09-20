@@ -5,6 +5,7 @@ use std::error::Error;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::filesystem::absolute_path;
@@ -22,16 +23,26 @@ pub(crate) struct Config {
     pub(crate) state_dir: PathBuf,
     pub(crate) settings: Settings,
     pub(crate) invocation: Invocation,
+    /// Original event context retained for telemetry without changing dispatch.
+    pub(crate) event: Option<String>,
+    pub(crate) event_workspace_id: Option<String>,
+    pub(crate) event_tab_id: Option<String>,
+    pub(crate) event_pane_id: Option<String>,
 }
 
 /// Operation selected by plugin context or a shell-hook command.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(crate) enum Invocation {
     Full,
     Workspace(String),
     Tab {
         workspace_id: String,
         tab_id: String,
+    },
+    /// Reconciles a pane-closed event by workspace; the closed pane has no surviving tab ID.
+    ClosedPane {
+        workspace_id: String,
+        pane_id: String,
     },
     RenamedTab {
         workspace_id: String,
@@ -73,12 +84,16 @@ impl Config {
         let socket_path = required_path(SOCKET_PATH_ENV)?;
         let state_dir = session_state_dir(&socket_path)?;
         let args: Vec<String> = env::args().skip(1).collect();
+        let event = env::var(PLUGIN_EVENT_ENV).ok();
+        let event_workspace_id = env::var(WORKSPACE_ID_ENV).ok();
+        let event_tab_id = env::var(TAB_ID_ENV).ok();
+        let event_pane_id = env::var(PANE_ID_ENV).ok();
         let invocation = invocation_from(
             &args,
-            env::var(PLUGIN_EVENT_ENV).ok().as_deref(),
-            env::var(WORKSPACE_ID_ENV).ok(),
-            env::var(TAB_ID_ENV).ok(),
-            env::var(PANE_ID_ENV).ok(),
+            event.as_deref(),
+            event_workspace_id.clone(),
+            event_tab_id.clone(),
+            event_pane_id.clone(),
         )?;
         let settings = if matches!(invocation, Invocation::Clear) {
             Settings::default()
@@ -91,6 +106,10 @@ impl Config {
             state_dir,
             settings,
             invocation,
+            event,
+            event_workspace_id,
+            event_tab_id,
+            event_pane_id,
         })
     }
 }
@@ -182,7 +201,7 @@ fn invocation_from(
         _ => return Err(io::Error::other("invalid herdr-labels invocation")),
     }
 
-    Ok(event_invocation(event, workspace_id, tab_id))
+    Ok(event_invocation(event, workspace_id, tab_id, pane_id))
 }
 
 fn required_value(name: &str, value: Option<String>) -> io::Result<String> {
@@ -193,6 +212,7 @@ fn event_invocation(
     event: Option<&str>,
     workspace_id: Option<String>,
     tab_id: Option<String>,
+    pane_id: Option<String>,
 ) -> Invocation {
     match event {
         Some("tab.closed") => Invocation::ClosedTab {
@@ -211,17 +231,24 @@ fn event_invocation(
             (Some(workspace_id), None) => Invocation::Workspace(workspace_id),
             _ => Invocation::Full,
         },
-        // After a pane closes or exits, the surviving pane supplies the tab's name.
-        Some("tab.focused" | "pane.focused" | "pane.closed" | "pane.exited") => {
-            match (workspace_id, tab_id) {
-                (Some(workspace_id), Some(tab_id)) => Invocation::Tab {
-                    workspace_id,
-                    tab_id,
-                },
-                (Some(workspace_id), None) => Invocation::Workspace(workspace_id),
-                _ => Invocation::Full,
-            }
-        }
+        // Herdr provides the closed pane identity, not the survivor's tab ID.
+        Some("pane.closed") => match (workspace_id, pane_id) {
+            (Some(workspace_id), Some(pane_id)) => Invocation::ClosedPane {
+                workspace_id,
+                pane_id,
+            },
+            (Some(workspace_id), None) => Invocation::Workspace(workspace_id),
+            _ => Invocation::Full,
+        },
+        // After a pane exits, the surviving pane supplies the tab's name.
+        Some("tab.focused" | "pane.focused" | "pane.exited") => match (workspace_id, tab_id) {
+            (Some(workspace_id), Some(tab_id)) => Invocation::Tab {
+                workspace_id,
+                tab_id,
+            },
+            (Some(workspace_id), None) => Invocation::Workspace(workspace_id),
+            _ => Invocation::Full,
+        },
         _ => Invocation::Full,
     }
 }

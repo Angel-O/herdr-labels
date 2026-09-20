@@ -36,6 +36,7 @@ struct FakeClient {
     snapshots: usize,
     rerun_on_first_snapshot: Option<PathBuf>,
     rerun_on_every_snapshot: Option<PathBuf>,
+    invalid_rerun_on_first_snapshot: Option<PathBuf>,
 }
 
 struct ProcessClient {
@@ -57,6 +58,7 @@ impl FakeClient {
             snapshots: 0,
             rerun_on_first_snapshot: None,
             rerun_on_every_snapshot: None,
+            invalid_rerun_on_first_snapshot: None,
         }
     }
 }
@@ -67,10 +69,17 @@ impl TabClient for FakeClient {
         if self.snapshots == 1
             && let Some(state_dir) = &self.rerun_on_first_snapshot
         {
-            ReconciliationLock::request_rerun(state_dir)?;
+            ReconciliationLock::request_rerun(state_dir, &Invocation::Full)?;
         }
         if let Some(state_dir) = &self.rerun_on_every_snapshot {
-            ReconciliationLock::request_rerun(state_dir)?;
+            ReconciliationLock::request_rerun(state_dir, &Invocation::Full)?;
+        }
+        if self.snapshots == 1
+            && let Some(state_dir) = &self.invalid_rerun_on_first_snapshot
+        {
+            let reruns = state_dir.join("reruns");
+            std::fs::create_dir_all(&reruns)?;
+            std::fs::write(reruns.join("invalid.json"), b"{")?;
         }
         Ok(SessionSnapshot {
             focused_pane_id: None,
@@ -158,12 +167,63 @@ fn process_info(program: &str) -> PaneProcessInfo {
 }
 
 fn config(directory: &TestDir, invocation: Invocation) -> Config {
+    let settings = Settings {
+        diagnostic_telemetry: true,
+        ..Settings::default()
+    };
     Config {
         socket_path: PathBuf::from("unused.sock"),
         state_dir: directory.0.clone(),
-        settings: Settings::default(),
+        settings,
         invocation,
+        event: None,
+        event_workspace_id: None,
+        event_tab_id: None,
+        event_pane_id: None,
     }
+}
+
+#[test]
+fn disabled_diagnostic_telemetry_builds_no_record() {
+    let directory = TestDir::new();
+    let mut config = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:p1".into(),
+        },
+    );
+    config.settings = Settings {
+        diagnostic_telemetry: false,
+        ..config.settings
+    };
+
+    assert!(matches!(telemetry_from_config(&config), Telemetry::Off));
+    assert!(matches!(
+        telemetry_from_invocation(&config, &config.invocation),
+        Telemetry::Off
+    ));
+}
+
+#[test]
+fn enabled_diagnostic_telemetry_builds_the_existing_record() {
+    let directory = TestDir::new();
+    let config = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:p1".into(),
+        },
+    );
+
+    assert!(matches!(
+        telemetry_from_config(&config),
+        Telemetry::Recording(_)
+    ));
+    assert!(matches!(
+        telemetry_from_invocation(&config, &config.invocation),
+        Telemetry::Recording(_)
+    ));
 }
 
 #[test]
@@ -213,12 +273,14 @@ fn coalescing_consumes_a_rerun_requested_during_the_first_pass() {
     let mut client = FakeClient::with_tab(None);
     client.rerun_on_first_snapshot = Some(directory.0.clone());
     let mut remaining_passes = MAX_RECONCILIATION_PASSES;
+    let mut telemetry = Telemetry::Off;
 
     run_coalesced_passes(
         &config,
         &Invocation::Workspace("w1".into()),
         &mut client,
         &mut remaining_passes,
+        &mut telemetry,
     )
     .unwrap();
 
@@ -234,12 +296,14 @@ fn continuous_reruns_stop_at_the_process_pass_budget() {
     let mut client = FakeClient::with_tab(None);
     client.rerun_on_every_snapshot = Some(directory.0.clone());
     let mut remaining_passes = MAX_RECONCILIATION_PASSES;
+    let mut telemetry = Telemetry::Off;
 
     run_coalesced_passes(
         &config,
         &Invocation::Full,
         &mut client,
         &mut remaining_passes,
+        &mut telemetry,
     )
     .unwrap();
 
@@ -254,14 +318,67 @@ fn handoff_uses_only_the_remaining_process_pass_budget() {
     let config = config(&directory, Invocation::Full);
     let mut client = FakeClient::with_tab(None);
     client.rerun_on_every_snapshot = Some(directory.0.clone());
-    ReconciliationLock::request_rerun(&directory.0).unwrap();
+    ReconciliationLock::request_rerun(&directory.0, &Invocation::Full).unwrap();
     let mut remaining_passes = 2;
+    let mut telemetry = Telemetry::Off;
 
-    handoff_after_release(&config, &mut client, &mut remaining_passes).unwrap();
+    handoff_after_release(&config, &mut client, &mut remaining_passes, &mut telemetry).unwrap();
 
     assert_eq!(client.snapshots, 2);
     assert_eq!(remaining_passes, 0);
     assert!(ReconciliationLock::rerun_requested(&directory.0).unwrap());
+}
+
+#[test]
+fn successful_handoff_executes_all_pending_requesters() {
+    let directory = TestDir::new();
+    let config = config(&directory, Invocation::Full);
+    let mut client = FakeClient::with_tab(None);
+    let first = Invocation::ClosedPane {
+        workspace_id: "w1".into(),
+        pane_id: "w1:p1".into(),
+    };
+    let second = Invocation::ClosedPane {
+        workspace_id: "w2".into(),
+        pane_id: "w2:p1".into(),
+    };
+    ReconciliationLock::request_rerun(&directory.0, &first).unwrap();
+    ReconciliationLock::request_rerun(&directory.0, &Invocation::Full).unwrap();
+    ReconciliationLock::request_rerun(&directory.0, &second).unwrap();
+    let mut remaining_passes = 4;
+    let mut telemetry = Telemetry::Off;
+
+    handoff_after_release(&config, &mut client, &mut remaining_passes, &mut telemetry).unwrap();
+
+    assert_eq!(client.snapshots, 3);
+    assert_eq!(remaining_passes, 1);
+    assert!(!ReconciliationLock::rerun_requested(&directory.0).unwrap());
+}
+
+#[test]
+fn malformed_consumed_rerun_finishes_its_close_record_before_returning_error() {
+    let directory = TestDir::new();
+    let config = config(&directory, Invocation::Full);
+    let invocation = Invocation::ClosedPane {
+        workspace_id: "w1".into(),
+        pane_id: "w1:p1".into(),
+    };
+    let mut client = FakeClient::with_tab(None);
+    client.invalid_rerun_on_first_snapshot = Some(directory.0.clone());
+    let mut remaining_passes = 2;
+    let mut telemetry = telemetry_from_invocation(&config, &invocation);
+
+    let error = run_coalesced_passes(
+        &config,
+        &invocation,
+        &mut client,
+        &mut remaining_passes,
+        &mut telemetry,
+    )
+    .unwrap_err();
+
+    assert!(!error.to_string().is_empty());
+    assert!(matches!(telemetry, Telemetry::Off));
 }
 
 #[test]

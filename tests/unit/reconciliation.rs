@@ -1,8 +1,15 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
-use crate::herdr::{PaneInfo, ProcessInfo};
+use crate::herdr::{PaneInfo, ProcessInfo, SessionTab};
+use crate::telemetry::Telemetry;
+
+fn run_pass(config: &Config, invocation: &Invocation, client: &mut impl TabClient) -> Result<()> {
+    let mut telemetry = Telemetry::Off;
+    super::run_pass(config, invocation, client, &mut telemetry)
+}
 
 static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
@@ -30,7 +37,10 @@ struct FakeClient {
     snapshot: SessionSnapshot,
     current: HashMap<String, Tab>,
     processes: HashMap<String, PaneProcessInfo>,
+    process_queries: Vec<String>,
     renamed: Vec<(String, String)>,
+    get_error: Option<String>,
+    rename_error: Option<String>,
 }
 
 impl FakeClient {
@@ -48,7 +58,10 @@ impl FakeClient {
             snapshot,
             current,
             processes,
+            process_queries: Vec::new(),
             renamed: Vec::new(),
+            get_error: None,
+            rename_error: None,
         }
     }
 }
@@ -59,10 +72,16 @@ impl TabClient for FakeClient {
     }
 
     fn get_tab(&mut self, tab_id: &str) -> Result<Option<Tab>> {
+        if let Some(error) = &self.get_error {
+            return Err(error.clone().into());
+        }
         Ok(self.current.get(tab_id).cloned())
     }
 
     fn rename_tab(&mut self, tab_id: &str, label: &str) -> Result<()> {
+        if let Some(error) = &self.rename_error {
+            return Err(error.clone().into());
+        }
         self.renamed.push((tab_id.to_owned(), label.to_owned()));
         if let Some(tab) = self.current.get_mut(tab_id) {
             tab.label = label.to_owned();
@@ -71,6 +90,7 @@ impl TabClient for FakeClient {
     }
 
     fn pane_process_info(&mut self, pane_id: &str) -> Result<PaneProcessInfo> {
+        self.process_queries.push(pane_id.to_owned());
         self.processes
             .get(pane_id)
             .cloned()
@@ -119,11 +139,19 @@ fn snapshot(tabs: Vec<SessionTab>) -> SessionSnapshot {
 }
 
 fn config(state_dir: &TestDir, invocation: Invocation) -> Config {
+    let settings = Settings {
+        diagnostic_telemetry: true,
+        ..Settings::default()
+    };
     Config {
         socket_path: PathBuf::from("unused.sock"),
         state_dir: state_dir.0.clone(),
-        settings: Settings::default(),
+        settings,
         invocation,
+        event: None,
+        event_workspace_id: None,
+        event_tab_id: None,
+        event_pane_id: None,
     }
 }
 
@@ -133,182 +161,10 @@ fn set_ownership(directory: &TestDir, ownership: TabOwnership) {
     state.persist().unwrap();
 }
 
-#[test]
-fn positions_are_independent_per_workspace_and_continue_after_nine() {
-    let mut tabs = (1..=11)
-        .map(|position| tab(&format!("w1:t{position}"), "w1", "name", false))
-        .collect::<Vec<_>>();
-    tabs.push(tab("w2:t1", "w2", "other", false));
-    let positions = tab_positions(&snapshot(tabs));
-    assert_eq!(positions["w1:t10"], 10);
-    assert_eq!(positions["w1:t11"], 11);
-    assert_eq!(positions["w2:t1"], 1);
-}
-
-#[test]
-fn pane_selection_is_conservative_for_background_splits() {
-    let mut split = tab("w1:t1", "w1", "1", false);
-    split.pane_count = 2;
-    let mut session = snapshot(vec![split.clone()]);
-    session.panes.push(PaneInfo {
-        pane_id: "other".into(),
-        tab_id: "w1:t1".into(),
-        agent: None,
-    });
-    assert_eq!(naming_pane(&session, &split), None);
-
-    split.focused = true;
-    session.focused_pane_id = Some("other".into());
-    assert_eq!(naming_pane(&session, &split), Some("other"));
-}
-
-#[test]
-fn shell_invocations_follow_the_pane_after_it_moves() {
-    let session = snapshot(vec![
-        tab("w1:t1", "w1", "one", false),
-        tab("w2:t1", "w2", "two", false),
-    ]);
-    let invocation = Invocation::Preexec {
-        pane_id: "w2:t1:pane".into(),
-        shell: "zsh".into(),
-        program: Some("nvim".into()),
-    };
-    let targets = scoped_tabs(&session, &invocation);
-    assert_eq!(targets.len(), 1);
-    assert_eq!(targets[0].tab.tab_id, "w2:t1");
-
-    let stale = Invocation::Preexec {
-        pane_id: "w1:old-pane-id".into(),
-        shell: "zsh".into(),
-        program: Some("nvim".into()),
-    };
-    assert!(scoped_tabs(&session, &stale).is_empty());
-}
-
-#[test]
-fn process_group_leader_is_required() {
-    let info = PaneProcessInfo {
-        foreground_process_group_id: Some(4),
-        foreground_processes: vec![ProcessInfo {
-            pid: 3,
-            name: "nvim".into(),
-            argv0: None,
-            argv: None,
-        }],
-    };
-    assert!(info.leader().is_none());
-}
-
-#[test]
-fn a_non_shell_child_wins_over_a_shell_script_group_leader() {
-    let policy = naming_policy(&Settings::default());
-    let info = PaneProcessInfo {
-        foreground_process_group_id: Some(7),
-        foreground_processes: vec![
-            ProcessInfo {
-                pid: 8,
-                name: "opencode".into(),
-                argv0: Some("opencode".into()),
-                argv: None,
-            },
-            ProcessInfo {
-                pid: 7,
-                name: "zsh".into(),
-                argv0: Some("zsh".into()),
-                argv: Some(vec!["zsh".into(), "opencode-env".into()]),
-            },
-        ],
-    };
-    assert_eq!(
-        representative_process(&info, &policy, None)
-            .unwrap()
-            .program(),
-        "opencode"
-    );
-}
-
-#[test]
-fn a_launched_binary_wins_over_its_node_launcher() {
-    let policy = naming_policy(&Settings::default());
-    let info = PaneProcessInfo {
-        foreground_process_group_id: Some(7),
-        foreground_processes: vec![
-            ProcessInfo {
-                pid: 8,
-                name: "codex".into(),
-                argv0: Some("codex".into()),
-                argv: Some(vec!["/opt/codex/bin/codex".into()]),
-            },
-            ProcessInfo {
-                pid: 7,
-                name: "node".into(),
-                argv0: Some("node".into()),
-                argv: Some(vec!["node".into(), "/usr/local/bin/codex".into()]),
-            },
-        ],
-    };
-    assert_eq!(
-        representative_process(&info, &policy, None)
-            .unwrap()
-            .program(),
-        "codex"
-    );
-}
-
-#[test]
-fn a_recognized_agent_wins_over_its_descendant_processes() {
-    let policy = naming_policy(&Settings::default());
-    let info = PaneProcessInfo {
-        foreground_process_group_id: Some(7),
-        foreground_processes: vec![
-            ProcessInfo {
-                pid: 10,
-                name: "Python".into(),
-                argv0: Some("Python".into()),
-                argv: Some(vec!["Python".into(), "run-host.py".into()]),
-            },
-            ProcessInfo {
-                pid: 9,
-                name: "bash".into(),
-                argv0: Some("bash".into()),
-                argv: Some(vec!["bash".into(), "run-with-ui.sh".into()]),
-            },
-            ProcessInfo {
-                pid: 8,
-                name: "opencode".into(),
-                argv0: Some("opencode".into()),
-                argv: Some(vec!["opencode".into()]),
-            },
-            ProcessInfo {
-                pid: 7,
-                name: "zsh".into(),
-                argv0: Some("zsh".into()),
-                argv: Some(vec!["zsh".into(), "opencode-env".into()]),
-            },
-        ],
-    };
-
-    assert_eq!(
-        representative_process(&info, &policy, Some("opencode"))
-            .unwrap()
-            .program(),
-        "opencode"
-    );
-}
-
-#[test]
-fn launcher_arguments_verify_a_program_before_its_child_appears() {
-    let policy = naming_policy(&Settings::default());
-    let info = PaneProcessInfo {
-        foreground_process_group_id: Some(7),
-        foreground_processes: vec![ProcessInfo {
-            pid: 7,
-            name: "node".into(),
-            argv0: Some("node".into()),
-            argv: Some(vec!["node".into(), "/usr/local/bin/codex".into()]),
-        }],
-    };
-    assert!(process_group_matches_program(&info, "codex", &policy));
+fn set_pane_mapping(directory: &TestDir, pane_id: &str, tab_id: &str) {
+    let mut state = State::load(&directory.0).unwrap();
+    state.set_pane_tab(pane_id, tab_id);
+    state.persist().unwrap();
 }
 
 #[test]
@@ -579,55 +435,6 @@ fn rejected_authoritative_events_leave_an_unowned_placeholder_untouched() {
 
     assert!(client.renamed.is_empty());
     assert_eq!(State::load(&directory.0).unwrap().ownership("w1:t1"), None);
-}
-
-#[test]
-fn ignored_preexec_uses_the_hook_shell_not_the_login_shell() {
-    let session_tab = tab("w1:t1", "w1", "[1] bash", false);
-    let session = snapshot(vec![session_tab.clone()]);
-    let mut client = FakeClient::new(session.clone(), &[("w1:t1:pane", "git")]);
-    let policy = naming_policy(&Settings::default());
-    let invocation = Invocation::Preexec {
-        pane_id: "w1:t1:pane".into(),
-        shell: "bash".into(),
-        program: Some("git".into()),
-    };
-
-    assert_eq!(
-        computed_name(
-            &mut client,
-            &session,
-            &session_tab,
-            &invocation,
-            &policy,
-            "zsh",
-            false,
-        )
-        .unwrap(),
-        Some("bash".into())
-    );
-}
-
-#[test]
-fn ambient_ignored_program_does_not_guess_the_active_shell() {
-    let session_tab = tab("w1:t1", "w1", "[1] bash", false);
-    let session = snapshot(vec![session_tab.clone()]);
-    let mut client = FakeClient::new(session.clone(), &[("w1:t1:pane", "git")]);
-    let policy = naming_policy(&Settings::default());
-
-    assert_eq!(
-        computed_name(
-            &mut client,
-            &session,
-            &session_tab,
-            &Invocation::Full,
-            &policy,
-            "zsh",
-            false,
-        )
-        .unwrap(),
-        None
-    );
 }
 
 #[test]
@@ -1087,35 +894,391 @@ fn focusing_a_pane_updates_an_owned_tab_from_the_active_pane() {
 }
 
 #[test]
-fn closing_a_focused_pane_updates_an_owned_tab_from_the_survivor() {
+fn native_pane_close_refreshes_an_owned_split_without_focus_change() {
     let directory = TestDir::new();
     set_ownership(
         &directory,
         TabOwnership::Owned {
-            last_base: "nvim".into(),
-            last_rendered: "[1] nvim".into(),
+            last_base: "ai board".into(),
+            last_rendered: "[1] ai board".into(),
         },
     );
-    let mut surviving = tab("w1:t1", "w1", "[1] nvim", true);
+    set_pane_mapping(&directory, "w1:t1:closed", "w1:t1");
+    let mut surviving = tab("w1:t1", "w1", "[1] ai board", false);
     surviving.pane_count = 1;
     let mut session = snapshot(vec![surviving]);
     session.panes[0].pane_id = "w1:t1:survivor".into();
-    let mut client = FakeClient::new(session, &[("w1:t1:survivor", "cargo")]);
+    let mut client = FakeClient::new(session, &[("w1:t1:survivor", "zsh")]);
     let closed = config(
         &directory,
-        Invocation::Tab {
+        Invocation::ClosedPane {
             workspace_id: "w1".into(),
-            tab_id: "w1:t1".into(),
+            pane_id: "w1:t1:closed".into(),
         },
     );
 
     run_pass(&closed, &closed.invocation, &mut client).unwrap();
 
-    assert_eq!(client.renamed, [("w1:t1".into(), "[1] cargo".into())]);
+    assert_eq!(client.renamed, [("w1:t1".into(), "[1] zsh".into())]);
     assert!(matches!(
         State::load(&directory.0).unwrap().ownership("w1:t1"),
-        Some(TabOwnership::Owned { last_base, .. }) if last_base == "cargo"
+        Some(TabOwnership::Owned { last_base, .. }) if last_base == "zsh"
     ));
+}
+
+#[test]
+fn closed_pane_mapping_scopes_process_query_and_rename_to_one_tab() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: "ai board".into(),
+            last_rendered: "[1] ai board".into(),
+        },
+    );
+    set_pane_mapping(&directory, "w1:t1:closed", "w1:t1");
+    let session = snapshot(vec![
+        tab("w1:t1", "w1", "[1] ai board", false),
+        tab("w1:t2", "w1", "[2] other", false),
+    ]);
+    let mut client = FakeClient::new(session, &[("w1:t1:pane", "zsh")]);
+    let closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+
+    run_pass(&closed, &closed.invocation, &mut client).unwrap();
+
+    assert_eq!(client.process_queries, ["w1:t1:pane"]);
+    assert_eq!(client.renamed, [("w1:t1".into(), "[1] zsh".into())]);
+}
+
+#[test]
+fn missing_closed_pane_mapping_is_an_observable_no_op() {
+    let directory = TestDir::new();
+    let session = snapshot(vec![tab("w1:t1", "w1", "[1] ai board", false)]);
+    let mut client = FakeClient::new(session, &[("w1:t1:pane", "zsh")]);
+    let closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+    let mut telemetry = crate::runner::telemetry_from_config(&closed);
+
+    super::run_pass(&closed, &closed.invocation, &mut client, &mut telemetry).unwrap();
+    telemetry.recording_mut().finish(&Ok(()));
+    let record = telemetry.recording_mut();
+
+    assert!(client.process_queries.is_empty());
+    assert!(client.renamed.is_empty());
+    assert_eq!(record.tab_decisions.len(), 0);
+    assert_eq!(record.terminal_outcome, "pane_mapping_missing");
+    let mapping = record.pane_mapping.as_ref().unwrap();
+    assert_eq!(mapping.resolution, "missing");
+    assert_eq!(mapping.validation, "not_run");
+    assert!(!mapping.consumed);
+}
+
+#[test]
+fn mismatched_closed_pane_mapping_is_an_observable_no_op() {
+    let directory = TestDir::new();
+    set_pane_mapping(&directory, "w1:t1:closed", "w2:t2");
+    let session = snapshot(vec![
+        tab("w1:t1", "w1", "[1] ai board", false),
+        tab("w2:t2", "w2", "[1] other", false),
+    ]);
+    let mut client = FakeClient::new(session, &[]);
+    let closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+    let mut telemetry = crate::runner::telemetry_from_config(&closed);
+
+    super::run_pass(&closed, &closed.invocation, &mut client, &mut telemetry).unwrap();
+    telemetry.recording_mut().finish(&Ok(()));
+    let record = telemetry.recording_mut();
+
+    assert!(client.process_queries.is_empty());
+    assert!(client.renamed.is_empty());
+    assert_eq!(record.terminal_outcome, "pane_mapping_invalid");
+    assert_eq!(
+        record.pane_mapping.as_ref().unwrap().validation,
+        "workspace_mismatch"
+    );
+}
+
+#[test]
+fn closed_pane_refresh_preserves_manual_ownership() {
+    let directory = TestDir::new();
+    set_ownership(&directory, TabOwnership::Manual);
+    set_pane_mapping(&directory, "w1:t1:closed", "w1:t1");
+    let session = snapshot(vec![tab("w1:t1", "w1", "[1] manual", false)]);
+    let mut client = FakeClient::new(session, &[("w1:t1:pane", "zsh")]);
+    let closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+
+    run_pass(&closed, &closed.invocation, &mut client).unwrap();
+
+    assert!(client.process_queries.is_empty());
+    assert!(client.renamed.is_empty());
+    assert_eq!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(&TabOwnership::Manual)
+    );
+}
+
+#[test]
+fn closed_pane_refresh_preserves_disabled_ownership() {
+    let directory = TestDir::new();
+    set_ownership(&directory, TabOwnership::AutomaticDisabled);
+    set_pane_mapping(&directory, "w1:t1:closed", "w1:t1");
+    let session = snapshot(vec![tab("w1:t1", "w1", "[1] disabled", false)]);
+    let mut client = FakeClient::new(session, &[("w1:t1:pane", "zsh")]);
+    let closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+
+    run_pass(&closed, &closed.invocation, &mut client).unwrap();
+
+    assert!(client.process_queries.is_empty());
+    assert!(client.renamed.is_empty());
+    assert_eq!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(&TabOwnership::AutomaticDisabled)
+    );
+}
+
+#[test]
+fn close_telemetry_uses_the_decision_snapshot_and_process_observation() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: "ai board".into(),
+            last_rendered: "[1] ai board".into(),
+        },
+    );
+    set_pane_mapping(&directory, "w1:t1:closed", "w1:t1");
+    let mut surviving = tab("w1:t1", "w1", "[1] ai board", false);
+    surviving.pane_count = 1;
+    let mut session = snapshot(vec![surviving]);
+    session.panes[0].pane_id = "w1:t1:survivor".into();
+    let mut client = FakeClient::new(session, &[("w1:t1:survivor", "zsh")]);
+    let mut closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+    closed.event = Some("pane.closed".into());
+    closed.event_workspace_id = Some("w1".into());
+    closed.event_pane_id = Some("w1:t1:closed".into());
+    let mut telemetry = crate::runner::telemetry_from_config(&closed);
+
+    super::run_pass(&closed, &closed.invocation, &mut client, &mut telemetry).unwrap();
+    telemetry.recording_mut().finish(&Ok(()));
+    let record = telemetry.recording_mut();
+
+    let candidate = &record.tab_decisions[0];
+    let mapping = record.pane_mapping.as_ref().unwrap();
+    assert_eq!(mapping.mapped_tab_id.as_deref(), Some("w1:t1"));
+    assert_eq!(mapping.resolution, "resolved");
+    assert_eq!(mapping.validation, "valid");
+    assert!(mapping.consumed);
+    assert_eq!(
+        State::load(&directory.0).unwrap().pane_tab("w1:t1:closed"),
+        None
+    );
+    assert_eq!(
+        record.snapshot.as_ref().unwrap().closed_pane_present,
+        Some(false)
+    );
+    assert_eq!(
+        candidate.selected_naming_pane.as_deref(),
+        Some("w1:t1:survivor")
+    );
+    assert_eq!(
+        candidate.process_info.as_ref().unwrap().pane_id,
+        "w1:t1:survivor"
+    );
+    assert_eq!(
+        candidate
+            .representative_process
+            .as_ref()
+            .unwrap()
+            .executable_basename,
+        "zsh"
+    );
+    assert_eq!(candidate.desired_label.as_deref(), Some("[1] zsh"));
+    assert_eq!(candidate.rename_result.as_deref(), Some("renamed"));
+    assert_eq!(record.terminal_outcome, "renamed");
+    serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&record).unwrap()).unwrap();
+}
+
+#[test]
+fn guarded_tab_read_failure_keeps_the_real_candidate_trace_without_claiming_a_rename() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: "ai board".into(),
+            last_rendered: "[1] ai board".into(),
+        },
+    );
+    set_pane_mapping(&directory, "w1:t1:closed", "w1:t1");
+    let mut session = snapshot(vec![tab("w1:t1", "w1", "[1] ai board", false)]);
+    session.panes[0].pane_id = "w1:t1:survivor".into();
+    let mut client = FakeClient::new(session, &[("w1:t1:survivor", "zsh")]);
+    client.get_error = Some("tab.get unavailable".into());
+    let closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+    let mut telemetry = crate::runner::telemetry_from_config(&closed);
+
+    let error =
+        super::run_pass(&closed, &closed.invocation, &mut client, &mut telemetry).unwrap_err();
+    telemetry.recording_mut().finish(&Err(error));
+    let record = telemetry.recording_mut();
+
+    let candidate = &record.tab_decisions[0];
+    assert_eq!(
+        candidate.selected_naming_pane.as_deref(),
+        Some("w1:t1:survivor")
+    );
+    assert!(candidate.process_info.is_some());
+    assert_eq!(candidate.desired_label.as_deref(), Some("[1] zsh"));
+    assert!(candidate.guarded_tab.is_none());
+    assert!(matches!(
+        candidate.ownership_after,
+        Some(TabOwnership::PendingRename { .. })
+    ));
+    assert!(matches!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(TabOwnership::PendingRename { .. })
+    ));
+    assert!(!candidate.rename_attempted);
+    assert!(
+        candidate
+            .rename_result
+            .as_deref()
+            .is_some_and(|result| result.contains("tab.get unavailable"))
+    );
+    assert_eq!(candidate.outcome.as_deref(), Some("guard_read_error"));
+}
+
+#[test]
+fn missing_tab_keeps_the_persisted_pending_rename_in_telemetry() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: "ai board".into(),
+            last_rendered: "[1] ai board".into(),
+        },
+    );
+    set_pane_mapping(&directory, "w1:t1:closed", "w1:t1");
+    let mut session = snapshot(vec![tab("w1:t1", "w1", "[1] ai board", false)]);
+    session.panes[0].pane_id = "w1:t1:survivor".into();
+    let mut client = FakeClient::new(session, &[("w1:t1:survivor", "zsh")]);
+    client.current.clear();
+    let closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+    let mut telemetry = crate::runner::telemetry_from_config(&closed);
+
+    super::run_pass(&closed, &closed.invocation, &mut client, &mut telemetry).unwrap();
+    telemetry.recording_mut().finish(&Ok(()));
+    let record = telemetry.recording_mut();
+
+    let candidate = &record.tab_decisions[0];
+    assert_eq!(candidate.rename_result.as_deref(), Some("tab_not_found"));
+    assert!(matches!(
+        candidate.ownership_after,
+        Some(TabOwnership::PendingRename { .. })
+    ));
+    assert!(matches!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(TabOwnership::PendingRename { .. })
+    ));
+    assert_eq!(candidate.outcome.as_deref(), Some("tab_missing"));
+}
+
+#[test]
+fn tab_rename_failure_keeps_the_guard_observation_and_records_the_attempt() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: "ai board".into(),
+            last_rendered: "[1] ai board".into(),
+        },
+    );
+    set_pane_mapping(&directory, "w1:t1:closed", "w1:t1");
+    let mut session = snapshot(vec![tab("w1:t1", "w1", "[1] ai board", false)]);
+    session.panes[0].pane_id = "w1:t1:survivor".into();
+    let mut client = FakeClient::new(session, &[("w1:t1:survivor", "zsh")]);
+    client.rename_error = Some("tab.rename rejected".into());
+    let closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+    let mut telemetry = crate::runner::telemetry_from_config(&closed);
+
+    let error =
+        super::run_pass(&closed, &closed.invocation, &mut client, &mut telemetry).unwrap_err();
+    telemetry.recording_mut().finish(&Err(error));
+    let record = telemetry.recording_mut();
+
+    let candidate = &record.tab_decisions[0];
+    assert_eq!(
+        candidate.guarded_tab.as_ref().unwrap().label,
+        "[1] ai board"
+    );
+    assert!(matches!(
+        candidate.ownership_after,
+        Some(TabOwnership::PendingRename { .. })
+    ));
+    assert!(matches!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(TabOwnership::PendingRename { .. })
+    ));
+    assert!(candidate.rename_attempted);
+    assert!(
+        candidate
+            .rename_result
+            .as_deref()
+            .is_some_and(|result| result.contains("tab.rename rejected"))
+    );
+    assert_eq!(candidate.outcome.as_deref(), Some("rename_error"));
 }
 
 #[test]

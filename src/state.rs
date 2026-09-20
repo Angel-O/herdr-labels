@@ -64,6 +64,8 @@ struct PersistedState {
     version: u32,
     suspended: bool,
     tabs: BTreeMap<String, TabOwnership>,
+    #[serde(default)]
+    pane_tabs: BTreeMap<String, String>,
 }
 
 impl State {
@@ -118,6 +120,41 @@ impl State {
         self.persisted.tabs.remove(tab_id)
     }
 
+    pub(crate) fn pane_tab(&self, pane_id: &str) -> Option<&str> {
+        self.persisted.pane_tabs.get(pane_id).map(String::as_str)
+    }
+
+    pub(crate) fn set_pane_tab(&mut self, pane_id: impl Into<String>, tab_id: impl Into<String>) {
+        self.persisted
+            .pane_tabs
+            .insert(pane_id.into(), tab_id.into());
+    }
+
+    pub(crate) fn remove_pane_tab(&mut self, pane_id: &str) -> Option<String> {
+        self.persisted.pane_tabs.remove(pane_id)
+    }
+
+    /// Upserts current pane membership while retaining absent panes whose tabs still exist.
+    pub(crate) fn refresh_pane_tabs<I, J, P, T>(&mut self, panes: I, tab_ids: J)
+    where
+        I: IntoIterator<Item = (P, T)>,
+        J: IntoIterator,
+        P: AsRef<str>,
+        T: AsRef<str>,
+        J::Item: AsRef<str>,
+    {
+        let tab_ids: HashSet<String> = tab_ids
+            .into_iter()
+            .map(|tab_id| tab_id.as_ref().to_owned())
+            .collect();
+        for (pane_id, tab_id) in panes {
+            self.set_pane_tab(pane_id.as_ref(), tab_id.as_ref());
+        }
+        self.persisted
+            .pane_tabs
+            .retain(|_, tab_id| tab_ids.contains(tab_id));
+    }
+
     /// Removes ownership records for tabs not present in `tab_ids`.
     pub(crate) fn prune_tabs<I, S>(&mut self, tab_ids: I)
     where
@@ -131,6 +168,9 @@ impl State {
         self.persisted
             .tabs
             .retain(|tab_id, _| tab_ids.contains(tab_id));
+        self.persisted
+            .pane_tabs
+            .retain(|_, tab_id| tab_ids.contains(tab_id));
     }
 
     /// Resolves a recorded rename after reading the tab's current label.
@@ -223,6 +263,7 @@ impl Default for PersistedState {
             version: STATE_VERSION,
             suspended: false,
             tabs: BTreeMap::new(),
+            pane_tabs: BTreeMap::new(),
         }
     }
 }

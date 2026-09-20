@@ -1,14 +1,18 @@
 //! Coordinates process-aware, race-conscious tab label reconciliation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::error::Error;
 
 use crate::config::{Config, Invocation};
-use crate::herdr::{HerdrClient, PaneProcessInfo, SessionSnapshot, SessionTab};
-use crate::naming::{NamingPolicy, ObservedProcess};
-use crate::numbering::{Tab, is_placeholder, numbered_label, strip_numeric_prefix};
+use crate::herdr::{HerdrClient, PaneProcessInfo, SessionSnapshot};
+use crate::naming::NamingPolicy;
+use crate::numbering::{Tab, is_placeholder, strip_numeric_prefix};
+use crate::process_selection::process_group_matches_program;
 use crate::settings::Settings;
 use crate::state::{State, TabOwnership};
+use crate::tab_reconciliation::reconcile_tab;
+use crate::targeting::{resolve_closed_pane, scoped_closed_pane_tabs, scoped_tabs};
+use crate::telemetry::Telemetry;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -41,6 +45,7 @@ pub(crate) fn run_pass(
     config: &Config,
     invocation: &Invocation,
     client: &mut impl TabClient,
+    telemetry: &mut Telemetry,
 ) -> Result<()> {
     let mut state = State::load(&config.state_dir)?;
     match invocation {
@@ -56,11 +61,51 @@ pub(crate) fn run_pass(
             state.set_suspended(false);
             state.persist()?;
         }
-        _ if state.is_suspended() => return Ok(()),
+        _ if state.is_suspended() => {
+            telemetry.set_terminal_outcome("suspended");
+            return Ok(());
+        }
         _ => {}
     }
 
     let snapshot = client.snapshot()?;
+    let closed_resolution = match invocation {
+        Invocation::ClosedPane {
+            workspace_id,
+            pane_id,
+        } => Some(resolve_closed_pane(
+            &state,
+            &snapshot,
+            workspace_id,
+            pane_id,
+        )),
+        _ => None,
+    };
+    state.refresh_pane_tabs(
+        snapshot
+            .panes
+            .iter()
+            .map(|pane| (&pane.pane_id, &pane.tab_id)),
+        snapshot.tabs.iter().map(|tab| &tab.tab.tab_id),
+    );
+    if let (Invocation::ClosedPane { pane_id, .. }, Some(resolution)) =
+        (invocation, closed_resolution.as_ref())
+    {
+        telemetry.record_pane_mapping(
+            pane_id,
+            resolution.mapped_tab_id.as_deref(),
+            resolution.resolution,
+            resolution.validation,
+            resolution.valid,
+        );
+        if !resolution.valid {
+            telemetry.record_snapshot(&snapshot, &[]);
+            telemetry.set_terminal_outcome(resolution.outcome);
+            state.persist()?;
+            return Ok(());
+        }
+        state.remove_pane_tab(pane_id);
+    }
     recover_pending(&snapshot, &mut state);
     if let Invocation::Toggle {
         tab_id: Some(tab_id),
@@ -70,24 +115,35 @@ pub(crate) fn run_pass(
         toggle_ownership(&snapshot, &mut state, tab_id);
         state.persist()?;
     }
-    let policy = naming_policy(&config.settings);
-    let fallback_shell = fallback_shell();
-    let targets = scoped_tabs(&snapshot, invocation);
-    let positions = tab_positions(&snapshot);
+    let targets = if let Some(resolution) = closed_resolution.as_ref() {
+        scoped_closed_pane_tabs(&snapshot, invocation, resolution.mapped_tab_id.as_deref())
+    } else {
+        scoped_tabs(&snapshot, invocation)
+    };
+    let target_ids = targets
+        .iter()
+        .map(|target| target.tab.tab_id.clone())
+        .collect::<Vec<_>>();
+    telemetry.record_snapshot(&snapshot, &target_ids);
 
     for session_tab in targets {
-        let position = positions[&session_tab.tab.tab_id];
-        reconcile_tab(
+        let mut tab_telemetry = telemetry.new_tab_decision(
+            &session_tab.tab,
+            state.ownership(&session_tab.tab.tab_id).cloned(),
+            session_tab.pane_count,
+            session_tab.focused,
+        );
+        let result = reconcile_tab(
             client,
             &snapshot,
             session_tab,
-            position,
             invocation,
-            &config.settings,
-            &policy,
-            &fallback_shell,
+            config,
             &mut state,
-        )?;
+            &mut tab_telemetry,
+        );
+        telemetry.push_tab_decision(tab_telemetry);
+        result?;
     }
 
     if matches!(invocation, Invocation::Full) {
@@ -134,428 +190,6 @@ fn clear_session(client: &mut impl TabClient, state: &mut State) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn reconcile_tab(
-    client: &mut impl TabClient,
-    snapshot: &SessionSnapshot,
-    session_tab: &SessionTab,
-    position: usize,
-    invocation: &Invocation,
-    settings: &Settings,
-    policy: &NamingPolicy,
-    fallback_shell: &str,
-    state: &mut State,
-) -> Result<()> {
-    let tab = &session_tab.tab;
-    let current_base = strip_numeric_prefix(&tab.label);
-    let ownership = state.ownership(&tab.tab_id).cloned();
-    let renamed_to_whitespace = !tab.label.is_empty()
-        && tab.label.trim().is_empty()
-        && matches!(
-            invocation,
-            Invocation::RenamedTab { tab_id, .. } if tab_id == &tab.tab_id
-        );
-    let forced = matches!(
-        invocation,
-        Invocation::Reset {
-            tab_id: Some(tab_id),
-            ..
-        } if tab_id == &tab.tab_id
-    );
-    let initial_adoption =
-        settings.auto_name_tabs && ownership.is_none() && is_placeholder(current_base);
-    let authoritative_initial_event = matches!(
-        invocation,
-        Invocation::Init { .. }
-            | Invocation::Preexec {
-                program: Some(_),
-                ..
-            }
-            | Invocation::Precmd { .. }
-    );
-    if initial_adoption && !authoritative_initial_event {
-        return Ok(());
-    }
-    if matches!(
-        ownership.as_ref(),
-        Some(TabOwnership::Owned {
-            last_base,
-            last_rendered,
-        }) if current_base != last_base || &tab.label != last_rendered
-    ) {
-        state.set_ownership(&tab.tab_id, TabOwnership::Manual);
-        return Ok(());
-    }
-    let eligible = if forced {
-        true
-    } else {
-        match ownership.as_ref() {
-            Some(TabOwnership::Manual) if current_base.trim().is_empty() => {
-                state.remove_ownership(&tab.tab_id);
-                true
-            }
-            Some(TabOwnership::Manual) => false,
-            Some(TabOwnership::AutomaticDisabled) if renamed_to_whitespace => {
-                state.remove_ownership(&tab.tab_id);
-                true
-            }
-            Some(TabOwnership::AutomaticDisabled) => false,
-            Some(TabOwnership::ResetPending) => true,
-            Some(TabOwnership::Owned { .. }) => true,
-            Some(TabOwnership::PendingRename { .. }) => false,
-            None if is_placeholder(current_base) => true,
-            None => {
-                state.set_ownership(&tab.tab_id, TabOwnership::Manual);
-                false
-            }
-        }
-    };
-
-    let own_rename_event = matches!(
-        (invocation, ownership.as_ref()),
-        (
-            Invocation::RenamedTab { tab_id, .. },
-            Some(TabOwnership::Owned { last_rendered, .. })
-        ) if tab_id == &tab.tab_id && last_rendered == &tab.label
-    );
-    let observes_process = matches!(
-        invocation,
-        Invocation::Tab { .. }
-            | Invocation::Init { .. }
-            | Invocation::Preexec { .. }
-            | Invocation::Precmd { .. }
-            | Invocation::Reset { .. }
-            | Invocation::Toggle { .. }
-    ) || renamed_to_whitespace;
-    let computed_base = if settings.auto_name_tabs
-        && eligible
-        && (observes_process || matches!(ownership, Some(TabOwnership::ResetPending)))
-        && !own_rename_event
-    {
-        computed_name(
-            client,
-            snapshot,
-            session_tab,
-            invocation,
-            policy,
-            fallback_shell,
-            false,
-        )?
-    } else {
-        None
-    };
-    if initial_adoption && computed_base.is_none() {
-        return Ok(());
-    }
-    let owned_base = if eligible {
-        match ownership.as_ref() {
-            Some(TabOwnership::Owned { last_base, .. }) => Some(last_base.as_str()),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    let desired_base = computed_base
-        .as_deref()
-        .or(owned_base)
-        .unwrap_or(current_base);
-    let desired = if settings.number_tabs {
-        numbered_label(position, desired_base)
-    } else {
-        desired_base.to_owned()
-    };
-    let plugin_owned = eligible && (computed_base.is_some() || owned_base.is_some());
-
-    if desired != tab.label {
-        if plugin_owned {
-            let (previous_base, previous_rendered, previous_reset_pending) = match &ownership {
-                Some(TabOwnership::Owned {
-                    last_base,
-                    last_rendered,
-                }) => (Some(last_base.clone()), Some(last_rendered.clone()), false),
-                Some(TabOwnership::ResetPending) => (None, None, true),
-                _ => (None, None, false),
-            };
-            state.set_ownership(
-                &tab.tab_id,
-                TabOwnership::PendingRename {
-                    observed: tab.label.clone(),
-                    desired: desired.clone(),
-                    desired_base: desired_base.to_owned(),
-                    previous_base,
-                    previous_rendered,
-                    previous_reset_pending,
-                },
-            );
-            state.persist()?;
-        }
-        let Some(latest) = client.get_tab(&tab.tab_id)? else {
-            return Ok(());
-        };
-        if latest.label != tab.label {
-            if plugin_owned {
-                state.resolve_pending_rename(&tab.tab_id, &latest.label);
-                state.persist()?;
-            }
-            return Ok(());
-        }
-        client.rename_tab(&tab.tab_id, &desired)?;
-    }
-
-    if plugin_owned {
-        state.set_ownership(
-            &tab.tab_id,
-            TabOwnership::Owned {
-                last_base: desired_base.to_owned(),
-                last_rendered: desired,
-            },
-        );
-    }
-    Ok(())
-}
-
-fn computed_name(
-    client: &mut impl TabClient,
-    snapshot: &SessionSnapshot,
-    tab: &SessionTab,
-    invocation: &Invocation,
-    policy: &NamingPolicy,
-    fallback_shell: &str,
-    ambient_shell_only: bool,
-) -> Result<Option<String>> {
-    match invocation {
-        Invocation::Preexec {
-            pane_id,
-            shell,
-            program: Some(program),
-            ..
-        } if pane_targets_tab(snapshot, pane_id, &tab.tab.tab_id) => {
-            let Ok(process_info) = client.pane_process_info(pane_id) else {
-                return Ok(None);
-            };
-            let Some(_) = representative_process(&process_info, policy, None) else {
-                return Ok(None);
-            };
-            if !process_group_matches_program(&process_info, program, policy) {
-                return Ok(None);
-            }
-            Ok(Some(
-                policy
-                    .label(
-                        shell,
-                        Some(&ObservedProcess {
-                            program: program.to_owned(),
-                            command_line: None,
-                        }),
-                    )
-                    .unwrap_or_default(),
-            ))
-        }
-        Invocation::Init {
-            pane_id,
-            shell,
-            shell_pid,
-        }
-        | Invocation::Precmd {
-            pane_id,
-            shell,
-            shell_pid,
-            ..
-        } if pane_targets_tab(snapshot, pane_id, &tab.tab.tab_id) => {
-            let Ok(process_info) = client.pane_process_info(pane_id) else {
-                return Ok(None);
-            };
-            if process_info.foreground_process_group_id != Some(*shell_pid) {
-                return Ok(None);
-            }
-            Ok(Some(policy.label(shell, None).unwrap_or_default()))
-        }
-        _ => {
-            let Some(pane_id) = naming_pane(snapshot, tab) else {
-                return Ok(None);
-            };
-            let Ok(process_info) = client.pane_process_info(pane_id) else {
-                return Ok(None);
-            };
-            let preferred_program = snapshot
-                .panes
-                .iter()
-                .find(|pane| pane.pane_id == pane_id)
-                .and_then(|pane| pane.agent.as_deref());
-            let Some(process) = representative_process(&process_info, policy, preferred_program)
-            else {
-                return Ok(None);
-            };
-            if ambient_shell_only && !policy.is_shell_program(process.program()) {
-                return Ok(None);
-            }
-            if policy.is_ignored_program(process.program()) {
-                return Ok(None);
-            }
-            Ok(Some(
-                policy
-                    .label(
-                        fallback_shell,
-                        Some(&ObservedProcess {
-                            program: process.program().to_owned(),
-                            command_line: None,
-                        }),
-                    )
-                    .unwrap_or_default(),
-            ))
-        }
-    }
-}
-
-fn process_group_matches_program(
-    process_info: &PaneProcessInfo,
-    program: &str,
-    policy: &NamingPolicy,
-) -> bool {
-    let Some(leader) = process_info.leader() else {
-        return false;
-    };
-    process_info
-        .foreground_processes
-        .iter()
-        .any(|process| policy.same_program(program, process.program()))
-        || leader.argv.as_deref().is_some_and(|arguments| {
-            arguments
-                .iter()
-                .skip(1)
-                .any(|argument| policy.same_program(program, argument))
-        })
-}
-
-fn representative_process<'a>(
-    process_info: &'a PaneProcessInfo,
-    policy: &NamingPolicy,
-    preferred_program: Option<&str>,
-) -> Option<&'a crate::herdr::ProcessInfo> {
-    let leader = process_info.leader()?;
-    if let Some(process) = preferred_program.and_then(|preferred| {
-        process_info
-            .foreground_processes
-            .iter()
-            .find(|process| policy.same_program(preferred, process.program()))
-    }) {
-        return Some(process);
-    }
-    let launched_process = leader.argv.as_deref().and_then(|arguments| {
-        process_info
-            .foreground_processes
-            .iter()
-            .filter(|process| process.pid != leader.pid)
-            .find(|process| {
-                arguments
-                    .iter()
-                    .skip(1)
-                    .any(|argument| policy.same_program(argument, process.program()))
-            })
-    });
-    if let Some(process) = launched_process {
-        return Some(process);
-    }
-    if !policy.is_shell_program(leader.program()) {
-        return Some(leader);
-    }
-    process_info
-        .foreground_processes
-        .iter()
-        .find(|process| !policy.is_shell_program(process.program()))
-        .or(Some(leader))
-}
-
-fn naming_pane<'a>(snapshot: &'a SessionSnapshot, tab: &SessionTab) -> Option<&'a str> {
-    let panes = snapshot
-        .panes
-        .iter()
-        .filter(|pane| pane.tab_id == tab.tab.tab_id);
-    if tab.pane_count == 1 {
-        return panes.map(|pane| pane.pane_id.as_str()).next();
-    }
-    if tab.focused {
-        let focused = snapshot.focused_pane_id.as_deref()?;
-        return panes
-            .filter(|pane| pane.pane_id == focused)
-            .map(|pane| pane.pane_id.as_str())
-            .next();
-    }
-    None
-}
-
-fn scoped_tabs<'a>(snapshot: &'a SessionSnapshot, invocation: &Invocation) -> Vec<&'a SessionTab> {
-    if let Invocation::Init { pane_id, .. }
-    | Invocation::Preexec { pane_id, .. }
-    | Invocation::Precmd { pane_id, .. } = invocation
-        && !snapshot.panes.iter().any(|pane| pane.pane_id == *pane_id)
-    {
-        return Vec::new();
-    }
-    let (workspace, tab) = match invocation {
-        Invocation::Workspace(workspace_id)
-        | Invocation::ClosedTab {
-            workspace_id: Some(workspace_id),
-            ..
-        } => (Some(workspace_id.as_str()), None),
-        Invocation::Tab {
-            workspace_id,
-            tab_id,
-        }
-        | Invocation::RenamedTab {
-            workspace_id,
-            tab_id,
-        } => (Some(workspace_id.as_str()), Some(tab_id.as_str())),
-        Invocation::Init { pane_id, .. }
-        | Invocation::Preexec { pane_id, .. }
-        | Invocation::Precmd { pane_id, .. } => (
-            None,
-            snapshot
-                .panes
-                .iter()
-                .find(|pane| pane.pane_id == *pane_id)
-                .map(|pane| pane.tab_id.as_str()),
-        ),
-        Invocation::Reset {
-            workspace_id: Some(workspace_id),
-            tab_id,
-        }
-        | Invocation::Toggle {
-            workspace_id: Some(workspace_id),
-            tab_id,
-        } => (Some(workspace_id.as_str()), tab_id.as_deref()),
-        _ => (None, None),
-    };
-    snapshot
-        .tabs
-        .iter()
-        .filter(|candidate| {
-            workspace.is_none_or(|id| candidate.tab.workspace_id == id)
-                && tab.is_none_or(|id| candidate.tab.tab_id == id)
-        })
-        .collect()
-}
-
-fn pane_targets_tab(snapshot: &SessionSnapshot, pane_id: &str, tab_id: &str) -> bool {
-    snapshot
-        .panes
-        .iter()
-        .any(|pane| pane.pane_id == pane_id && pane.tab_id == tab_id)
-}
-
-fn tab_positions(snapshot: &SessionSnapshot) -> HashMap<String, usize> {
-    let mut positions = HashMap::<String, usize>::new();
-    snapshot
-        .tabs
-        .iter()
-        .map(|tab| {
-            let position = positions.entry(tab.tab.workspace_id.clone()).or_default();
-            *position += 1;
-            (tab.tab.tab_id.clone(), *position)
-        })
-        .collect()
-}
-
 fn recover_pending(snapshot: &SessionSnapshot, state: &mut State) {
     for tab in &snapshot.tabs {
         state.resolve_pending_rename(&tab.tab.tab_id, &tab.tab.label);
@@ -581,7 +215,7 @@ fn toggle_ownership(snapshot: &SessionSnapshot, state: &mut State, tab_id: &str)
     );
 }
 
-fn naming_policy(settings: &Settings) -> NamingPolicy {
+pub(crate) fn naming_policy(settings: &Settings) -> NamingPolicy {
     NamingPolicy {
         hide_idle_shell: settings.hide_idle_shell,
         max_label_chars: settings.max_label_chars,
@@ -593,16 +227,6 @@ fn naming_policy(settings: &Settings) -> NamingPolicy {
             .collect::<HashSet<_>>(),
         aliases: settings.process_aliases.clone(),
     }
-}
-
-fn fallback_shell() -> String {
-    std::env::var("SHELL")
-        .ok()
-        .as_deref()
-        .and_then(|shell| shell.rsplit('/').next())
-        .filter(|shell| !shell.is_empty())
-        .unwrap_or("zsh")
-        .to_owned()
 }
 
 #[cfg(test)]

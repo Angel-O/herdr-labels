@@ -6,6 +6,7 @@ fn settings_are_typed_and_reject_unknown_fields() {
         r#"
             auto_name_tabs = false
             number_tabs = true
+            diagnostic_telemetry = true
             max_label_chars = 12
             [process_aliases]
             bv = "beads_viewer"
@@ -14,6 +15,7 @@ fn settings_are_typed_and_reject_unknown_fields() {
     .unwrap();
     assert!(!parsed.auto_name_tabs);
     assert!(parsed.number_tabs);
+    assert!(parsed.diagnostic_telemetry);
     assert_eq!(parsed.max_label_chars, 12);
     assert_eq!(parsed.process_aliases["bv"], "beads_viewer");
     assert!(toml::from_str::<Settings>("unknown = true").is_err());
@@ -42,4 +44,9 @@ fn transient_prompt_programs_are_ignored_by_default() {
             "{program} should be ignored"
         );
     }
+}
+
+#[test]
+fn diagnostic_telemetry_is_disabled_by_default() {
+    assert!(!Settings::default().diagnostic_telemetry);
 }

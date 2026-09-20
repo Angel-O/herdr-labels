@@ -132,6 +132,7 @@ Override that path with `HERDR_LABELS_CONFIG`.
 auto_name_tabs = true
 number_tabs = true
 hide_idle_shell = false
+diagnostic_telemetry = false
 max_label_chars = 24
 
 shells = ["zsh", "bash", "sh", "dash", "ksh"]
@@ -150,6 +151,7 @@ The two primary settings control all tabs:
 | --- | --- | --- |
 | `auto_name_tabs` | Eligible tabs follow their foreground process. | Process changes do not rename tabs. |
 | `number_tabs` | Every tab keeps its one-based `[n]` prefix. | Generated number prefixes are removed and no longer added. |
+| `diagnostic_telemetry` | Emit detailed decision records to the plugin command log. | Do not build or emit decision telemetry. |
 
 These settings are independent. For example, setting `auto_name_tabs = false`
 and `number_tabs = true` keeps tab numbers current without changing semantic
