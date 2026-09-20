@@ -26,43 +26,14 @@ pub(super) fn process_group_matches_program(
 pub(super) struct RepresentativeSelection<'a> {
     pub(super) process: &'a ProcessInfo,
     pub(super) reason: &'static str,
-    pub(super) ignored_processes: Vec<&'a ProcessInfo>,
 }
 
-#[allow(dead_code)]
-pub(super) fn representative_process<'a>(
+pub(super) fn select_representative<'a>(
     process_info: &'a PaneProcessInfo,
     policy: &NamingPolicy,
     preferred_program: Option<&str>,
-) -> Option<&'a ProcessInfo> {
-    representative_process_with_trace(process_info, policy, preferred_program)
-        .map(|selection| selection.process)
-}
-
-pub(super) fn representative_process_with_trace<'a>(
-    process_info: &'a PaneProcessInfo,
-    policy: &NamingPolicy,
-    preferred_program: Option<&str>,
-) -> Option<RepresentativeSelection<'a>> {
-    representative_process_with_trace_mode(process_info, policy, preferred_program, true)
-}
-
-pub(super) fn representative_process_with_trace_mode<'a>(
-    process_info: &'a PaneProcessInfo,
-    policy: &NamingPolicy,
-    preferred_program: Option<&str>,
-    collect_ignored_processes: bool,
 ) -> Option<RepresentativeSelection<'a>> {
     let leader = process_info.leader()?;
-    let ignored_processes = if collect_ignored_processes {
-        process_info
-            .foreground_processes
-            .iter()
-            .filter(|process| policy.is_ignored_program(process.program()))
-            .collect()
-    } else {
-        Vec::new()
-    };
     if let Some(process) = preferred_program.and_then(|preferred| {
         process_info.foreground_processes.iter().find(|process| {
             policy.same_program(preferred, process.program())
@@ -72,7 +43,6 @@ pub(super) fn representative_process_with_trace_mode<'a>(
         return Some(RepresentativeSelection {
             process,
             reason: "preferred",
-            ignored_processes,
         });
     }
     let launched_process = leader.argv.as_deref().and_then(|arguments| {
@@ -92,14 +62,12 @@ pub(super) fn representative_process_with_trace_mode<'a>(
         return Some(RepresentativeSelection {
             process,
             reason: "launched",
-            ignored_processes,
         });
     }
     if !policy.is_shell_program(leader.program()) && !policy.is_ignored_program(leader.program()) {
         return Some(RepresentativeSelection {
             process: leader,
             reason: "leader",
-            ignored_processes,
         });
     }
     if let Some(process) = process_info.foreground_processes.iter().find(|process| {
@@ -110,14 +78,12 @@ pub(super) fn representative_process_with_trace_mode<'a>(
         return Some(RepresentativeSelection {
             process,
             reason: "foreground",
-            ignored_processes,
         });
     }
     if policy.is_shell_program(leader.program()) {
         return Some(RepresentativeSelection {
             process: leader,
             reason: "shell_leader_fallback",
-            ignored_processes,
         });
     }
     None

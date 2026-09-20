@@ -49,8 +49,9 @@ fn a_non_shell_child_wins_over_a_shell_script_group_leader() {
         ],
     };
     assert_eq!(
-        representative_process(&info, &policy, None)
+        select_representative(&info, &policy, None)
             .unwrap()
+            .process
             .program(),
         "opencode"
     );
@@ -79,19 +80,9 @@ fn ignored_child_is_skipped_and_shell_leader_is_selected() {
         ],
     };
 
-    let selection = representative_process_with_trace(&info, &policy, None).unwrap();
+    let selection = select_representative(&info, &policy, None).unwrap();
     assert_eq!(selection.process.program(), "zsh");
     assert_eq!(selection.reason, "shell_leader_fallback");
-    assert_eq!(
-        selection
-            .ignored_processes
-            .iter()
-            .map(|process| process.program())
-            .collect::<Vec<_>>(),
-        ["starship"]
-    );
-    let naming_only = representative_process_with_trace_mode(&info, &policy, None, false).unwrap();
-    assert!(naming_only.ignored_processes.is_empty());
 }
 
 #[test]
@@ -115,7 +106,7 @@ fn ignored_non_shell_leader_is_skipped_for_a_later_usable_child() {
         ],
     };
 
-    let selection = representative_process_with_trace(&info, &policy, None).unwrap();
+    let selection = select_representative(&info, &policy, None).unwrap();
     assert_eq!(selection.process.program(), "nvim");
     assert_eq!(selection.reason, "foreground");
 }
@@ -141,8 +132,9 @@ fn a_launched_binary_wins_over_its_node_launcher() {
         ],
     };
     assert_eq!(
-        representative_process(&info, &policy, None)
+        select_representative(&info, &policy, None)
             .unwrap()
+            .process
             .program(),
         "codex"
     );
@@ -182,8 +174,9 @@ fn a_recognized_agent_wins_over_its_descendant_processes() {
     };
 
     assert_eq!(
-        representative_process(&info, &policy, Some("opencode"))
+        select_representative(&info, &policy, Some("opencode"))
             .unwrap()
+            .process
             .program(),
         "opencode"
     );

@@ -4,7 +4,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
 use crate::herdr::{PaneInfo, ProcessInfo, SessionTab};
-use crate::telemetry::DecisionRecord;
+use crate::telemetry::Telemetry;
+
+fn run_pass(config: &Config, invocation: &Invocation, client: &mut impl TabClient) -> Result<()> {
+    let mut telemetry = Telemetry::Off;
+    super::run_pass(config, invocation, client, &mut telemetry)
+}
 
 static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
@@ -963,14 +968,15 @@ fn missing_closed_pane_mapping_is_an_observable_no_op() {
             pane_id: "w1:t1:closed".into(),
         },
     );
-    let mut record = DecisionRecord::from_config(&closed).unwrap();
+    let mut telemetry = crate::runner::telemetry_from_config(&closed);
 
-    run_pass_with_telemetry(&closed, &closed.invocation, &mut client, Some(&mut record)).unwrap();
-    record.finish(&Ok(()));
+    super::run_pass(&closed, &closed.invocation, &mut client, &mut telemetry).unwrap();
+    telemetry.recording_mut().finish(&Ok(()));
+    let record = telemetry.recording_mut();
 
     assert!(client.process_queries.is_empty());
     assert!(client.renamed.is_empty());
-    assert_eq!(record.candidates.len(), 0);
+    assert_eq!(record.tab_decisions.len(), 0);
     assert_eq!(record.terminal_outcome, "pane_mapping_missing");
     let mapping = record.pane_mapping.as_ref().unwrap();
     assert_eq!(mapping.resolution, "missing");
@@ -994,10 +1000,11 @@ fn mismatched_closed_pane_mapping_is_an_observable_no_op() {
             pane_id: "w1:t1:closed".into(),
         },
     );
-    let mut record = DecisionRecord::from_config(&closed).unwrap();
+    let mut telemetry = crate::runner::telemetry_from_config(&closed);
 
-    run_pass_with_telemetry(&closed, &closed.invocation, &mut client, Some(&mut record)).unwrap();
-    record.finish(&Ok(()));
+    super::run_pass(&closed, &closed.invocation, &mut client, &mut telemetry).unwrap();
+    telemetry.recording_mut().finish(&Ok(()));
+    let record = telemetry.recording_mut();
 
     assert!(client.process_queries.is_empty());
     assert!(client.renamed.is_empty());
@@ -1084,12 +1091,13 @@ fn close_telemetry_uses_the_decision_snapshot_and_process_observation() {
     closed.event = Some("pane.closed".into());
     closed.event_workspace_id = Some("w1".into());
     closed.event_pane_id = Some("w1:t1:closed".into());
-    let mut record = DecisionRecord::from_config(&closed).unwrap();
+    let mut telemetry = crate::runner::telemetry_from_config(&closed);
 
-    run_pass_with_telemetry(&closed, &closed.invocation, &mut client, Some(&mut record)).unwrap();
-    record.finish(&Ok(()));
+    super::run_pass(&closed, &closed.invocation, &mut client, &mut telemetry).unwrap();
+    telemetry.recording_mut().finish(&Ok(()));
+    let record = telemetry.recording_mut();
 
-    let candidate = &record.candidates[0];
+    let candidate = &record.tab_decisions[0];
     let mapping = record.pane_mapping.as_ref().unwrap();
     assert_eq!(mapping.mapped_tab_id.as_deref(), Some("w1:t1"));
     assert_eq!(mapping.resolution, "resolved");
@@ -1147,14 +1155,14 @@ fn guarded_tab_read_failure_keeps_the_real_candidate_trace_without_claiming_a_re
             pane_id: "w1:t1:closed".into(),
         },
     );
-    let mut record = DecisionRecord::from_config(&closed).unwrap();
+    let mut telemetry = crate::runner::telemetry_from_config(&closed);
 
     let error =
-        run_pass_with_telemetry(&closed, &closed.invocation, &mut client, Some(&mut record))
-            .unwrap_err();
-    record.finish(&Err(error));
+        super::run_pass(&closed, &closed.invocation, &mut client, &mut telemetry).unwrap_err();
+    telemetry.recording_mut().finish(&Err(error));
+    let record = telemetry.recording_mut();
 
-    let candidate = &record.candidates[0];
+    let candidate = &record.tab_decisions[0];
     assert_eq!(
         candidate.selected_naming_pane.as_deref(),
         Some("w1:t1:survivor")
@@ -1202,12 +1210,13 @@ fn missing_tab_keeps_the_persisted_pending_rename_in_telemetry() {
             pane_id: "w1:t1:closed".into(),
         },
     );
-    let mut record = DecisionRecord::from_config(&closed).unwrap();
+    let mut telemetry = crate::runner::telemetry_from_config(&closed);
 
-    run_pass_with_telemetry(&closed, &closed.invocation, &mut client, Some(&mut record)).unwrap();
-    record.finish(&Ok(()));
+    super::run_pass(&closed, &closed.invocation, &mut client, &mut telemetry).unwrap();
+    telemetry.recording_mut().finish(&Ok(()));
+    let record = telemetry.recording_mut();
 
-    let candidate = &record.candidates[0];
+    let candidate = &record.tab_decisions[0];
     assert_eq!(candidate.rename_result.as_deref(), Some("tab_not_found"));
     assert!(matches!(
         candidate.ownership_after,
@@ -1242,14 +1251,14 @@ fn tab_rename_failure_keeps_the_guard_observation_and_records_the_attempt() {
             pane_id: "w1:t1:closed".into(),
         },
     );
-    let mut record = DecisionRecord::from_config(&closed).unwrap();
+    let mut telemetry = crate::runner::telemetry_from_config(&closed);
 
     let error =
-        run_pass_with_telemetry(&closed, &closed.invocation, &mut client, Some(&mut record))
-            .unwrap_err();
-    record.finish(&Err(error));
+        super::run_pass(&closed, &closed.invocation, &mut client, &mut telemetry).unwrap_err();
+    telemetry.recording_mut().finish(&Err(error));
+    let record = telemetry.recording_mut();
 
-    let candidate = &record.candidates[0];
+    let candidate = &record.tab_decisions[0];
     assert_eq!(
         candidate.guarded_tab.as_ref().unwrap().label,
         "[1] ai board"

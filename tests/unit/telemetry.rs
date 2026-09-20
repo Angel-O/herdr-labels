@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use super::*;
-use crate::config::Config;
+use crate::config::{Config, Invocation};
 use crate::herdr::{PaneInfo, PaneProcessInfo, ProcessInfo, SessionSnapshot, SessionTab};
 use crate::numbering::Tab;
 use crate::settings::Settings;
@@ -50,9 +50,10 @@ fn closed_event_record_keeps_context_and_exact_snapshot() {
         pane_id: "w1:t1:closed".into(),
     };
     let config = config(invocation, Some("pane.closed"));
-    let mut record = DecisionRecord::from_config(&config).unwrap();
+    let mut telemetry = crate::runner::telemetry_from_config(&config);
 
-    record.record_snapshot(&snapshot(), &["w1:t1".into()]);
+    telemetry.record_snapshot(&snapshot(), &["w1:t1".into()]);
+    let record = telemetry.recording_mut();
 
     assert_eq!(record.trigger, "pane.closed");
     assert_eq!(record.event_pane_id.as_deref(), Some("w1:t1:closed"));
@@ -79,7 +80,8 @@ fn deferred_close_record_uses_the_consumed_request_context() {
         pane_id: "deferred:t2:closed".into(),
     };
 
-    let record = DecisionRecord::from_invocation(&holder, &request).unwrap();
+    let mut telemetry = crate::runner::telemetry_from_invocation(&holder, &request);
+    let record = telemetry.recording_mut();
 
     assert_eq!(record.trigger, "pane.closed");
     assert_eq!(record.workspace_id.as_deref(), Some("deferred"));
@@ -95,14 +97,33 @@ fn focus_control_record_is_distinct_and_parseable() {
         tab_id: "w1:t1".into(),
     };
     let config = config(invocation, Some("tab.focused"));
-    let mut record = DecisionRecord::from_config(&config).unwrap();
-    record.finish(&Ok(()));
+    let mut telemetry = crate::runner::telemetry_from_config(&config);
+    telemetry.recording_mut().finish(&Ok(()));
+    let record = telemetry.recording_mut();
 
     let value: serde_json::Value =
         serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
     assert_eq!(value["record_type"], "herdr_labels_decision");
     assert_eq!(value["trigger"], "tab.focused");
     assert_eq!(value["terminal_outcome"], "no_candidate_tabs");
+}
+
+#[test]
+fn tab_decisions_keep_the_external_candidates_field_name() {
+    let invocation = Invocation::Tab {
+        workspace_id: "w1".into(),
+        tab_id: "w1:t1".into(),
+    };
+    let config = config(invocation, Some("tab.focused"));
+    let mut telemetry = crate::runner::telemetry_from_config(&config);
+    let tab = snapshot().tabs[0].tab.clone();
+    let decision = telemetry.new_tab_decision(&tab, None, 1, true);
+    telemetry.push_tab_decision(decision);
+
+    let value: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(telemetry.recording_mut()).unwrap()).unwrap();
+    assert!(value.get("candidates").is_some());
+    assert!(value.get("tab_decisions").is_none());
 }
 
 #[test]

@@ -7,15 +7,27 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-use crate::config::{Config, Invocation};
 use crate::herdr::{PaneProcessInfo, ProcessInfo, SessionSnapshot};
+use crate::naming::NamingPolicy;
 use crate::numbering::Tab;
-use crate::state::TabOwnership;
+use crate::state::{State, TabOwnership};
 
 const RECORD_TYPE: &str = "herdr_labels_decision";
 const SCHEMA_VERSION: u8 = 1;
 
 static PROCESS_START: OnceLock<Instant> = OnceLock::new();
+
+/// Diagnostic recording mode for one invocation.
+pub(crate) enum Telemetry {
+    Off,
+    Recording(Box<DecisionRecord>),
+}
+
+/// Diagnostic recording mode for one reconciled tab.
+pub(crate) enum TabTelemetry {
+    Off,
+    Recording(Box<TabDecisionRecord>),
+}
 
 /// One in-memory, JSON-serializable decision record for a close or focus-control path.
 ///
@@ -37,7 +49,8 @@ pub(crate) struct DecisionRecord {
     pub(crate) target_scope: TargetScope,
     pub(crate) snapshot: Option<SnapshotRecord>,
     pub(crate) pane_mapping: Option<PaneMappingRecord>,
-    pub(crate) candidates: Vec<CandidateRecord>,
+    #[serde(rename = "candidates")]
+    pub(crate) tab_decisions: Vec<TabDecisionRecord>,
     pub(crate) lock: LockRecord,
     pub(crate) rerun: RerunRecord,
     pub(crate) terminal_outcome: String,
@@ -106,7 +119,7 @@ pub(crate) struct PaneSnapshotRecord {
 }
 
 #[derive(Debug, Default, Serialize, PartialEq, Eq)]
-pub(crate) struct CandidateRecord {
+pub(crate) struct TabDecisionRecord {
     pub(crate) tab_id: String,
     pub(crate) workspace_id: String,
     pub(crate) label: String,
@@ -153,82 +166,307 @@ pub(crate) struct TabObservation {
     pub(crate) label: String,
 }
 
-impl DecisionRecord {
-    pub(crate) fn from_config(config: &Config) -> Option<Self> {
-        if !config.settings.diagnostic_telemetry {
-            return None;
+impl Telemetry {
+    #[cfg(test)]
+    pub(crate) fn recording_mut(&mut self) -> &mut DecisionRecord {
+        match self {
+            Self::Recording(record) => record,
+            Self::Off => panic!("recording telemetry expected"),
         }
-        let (trigger, path, target_kind) = match config.event.as_deref() {
-            Some("pane.closed") => ("pane.closed", "pane_closed", "workspace"),
-            Some("pane.focused" | "tab.focused")
-                if matches!(config.invocation, Invocation::Tab { .. }) =>
-            {
-                (config.event.as_deref().unwrap(), "focus_control", "tab")
-            }
-            _ if matches!(config.invocation, Invocation::ClosedPane { .. }) => {
-                ("pane.closed", "pane_closed", "workspace")
-            }
-            _ => return None,
+    }
+
+    pub(crate) fn record_snapshot(
+        &mut self,
+        snapshot: &SessionSnapshot,
+        candidate_tab_ids: &[String],
+    ) {
+        let Self::Recording(record) = self else {
+            return;
         };
-        let workspace_id = config
-            .event_workspace_id
-            .clone()
-            .or_else(|| invocation_workspace(&config.invocation));
-        let event_pane_id = config.event_pane_id.clone().or_else(|| {
-            if let Invocation::ClosedPane { pane_id, .. } = &config.invocation {
-                Some(pane_id.clone())
-            } else {
-                None
-            }
+        record.record_snapshot(snapshot, candidate_tab_ids);
+    }
+
+    pub(crate) fn record_pane_mapping(
+        &mut self,
+        pane_id: &str,
+        mapped_tab_id: Option<&str>,
+        resolution: &str,
+        validation: &str,
+        consumed: bool,
+    ) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.pane_mapping = Some(PaneMappingRecord {
+            pane_id: pane_id.into(),
+            mapped_tab_id: mapped_tab_id.map(str::to_owned),
+            resolution: resolution.into(),
+            validation: validation.into(),
+            consumed,
         });
-        let event_tab_id = config
-            .event_tab_id
-            .clone()
-            .or_else(|| invocation_tab(&config.invocation));
-        Some(Self::new(
-            trigger,
-            path,
-            target_kind,
-            workspace_id,
-            event_pane_id,
-            event_tab_id,
-        ))
     }
 
-    /// Builds a record from the invocation actually consumed by a deferred pass.
-    pub(crate) fn from_invocation(config: &Config, invocation: &Invocation) -> Option<Self> {
-        if !config.settings.diagnostic_telemetry {
-            return None;
+    pub(crate) fn new_tab_decision(
+        &self,
+        tab: &Tab,
+        ownership: Option<TabOwnership>,
+        pane_count: usize,
+        focused: bool,
+    ) -> TabTelemetry {
+        match self {
+            Self::Off => TabTelemetry::Off,
+            Self::Recording(_) => TabTelemetry::Recording(Box::new(TabDecisionRecord {
+                tab_id: tab.tab_id.clone(),
+                workspace_id: tab.workspace_id.clone(),
+                label: tab.label.clone(),
+                pane_count,
+                focused,
+                ownership_before: ownership,
+                ..TabDecisionRecord::default()
+            })),
         }
-        let (trigger, path, target_kind) = match invocation {
-            Invocation::ClosedPane { .. } => ("pane.closed", "pane_closed", "workspace"),
-            Invocation::Tab { .. }
-                if matches!(
-                    config.event.as_deref(),
-                    Some("pane.focused" | "tab.focused")
-                ) =>
-            {
-                (config.event.as_deref().unwrap(), "focus_control", "tab")
-            }
-            _ => return None,
-        };
-        let workspace_id = invocation_workspace(invocation);
-        let event_pane_id = match invocation {
-            Invocation::ClosedPane { pane_id, .. } => Some(pane_id.clone()),
-            _ => config.event_pane_id.clone(),
-        };
-        let event_tab_id = invocation_tab(invocation);
-        Some(Self::new(
-            trigger,
-            path,
-            target_kind,
-            workspace_id,
-            event_pane_id,
-            event_tab_id,
-        ))
     }
 
-    fn new(
+    pub(crate) fn push_tab_decision(&mut self, decision: TabTelemetry) {
+        let (Self::Recording(record), TabTelemetry::Recording(decision)) = (self, decision) else {
+            return;
+        };
+        record.tab_decisions.push(*decision);
+    }
+
+    pub(crate) fn record_lock_attempt(&mut self, phase: &str, result: &str, wait_ns: u64) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.lock.attempts.push(LockAttempt {
+            phase: phase.into(),
+            result: result.into(),
+            wait_ns,
+        });
+    }
+
+    pub(crate) fn record_rerun_requested(&mut self) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.rerun.requested = true;
+        record.rerun.handoff = "requested".into();
+    }
+
+    pub(crate) fn record_handoff(&mut self, outcome: &str) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.rerun.handoff = outcome.into();
+    }
+
+    pub(crate) fn set_terminal_outcome(&mut self, outcome: &str) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.terminal_outcome = outcome.into();
+        if outcome == "lock_dropped" {
+            record.lock.benign_timeout_or_drop = true;
+        }
+    }
+
+    pub(crate) fn finish_and_emit(&mut self, result: &Result<()>) {
+        let current = std::mem::replace(self, Self::Off);
+        let Self::Recording(mut record) = current else {
+            return;
+        };
+        record.finish(result);
+        record.emit();
+    }
+}
+
+impl TabTelemetry {
+    #[cfg(test)]
+    pub(crate) fn recording_mut(&mut self) -> &mut TabDecisionRecord {
+        match self {
+            Self::Recording(record) => record,
+            Self::Off => panic!("recording tab telemetry expected"),
+        }
+    }
+
+    pub(crate) fn set_eligible(&mut self, eligible: bool, rejection_reason: Option<&str>) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.eligible = Some(eligible);
+        if let Some(reason) = rejection_reason {
+            record.rejection_reason = Some(reason.into());
+        }
+    }
+
+    pub(crate) fn set_ownership_after(&mut self, state: &State, tab_id: &str) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.ownership_after = state.ownership(tab_id).cloned();
+    }
+
+    pub(crate) fn reject(&mut self, reason: &str) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.rejection_reason = Some(reason.into());
+        if record.outcome.is_none() {
+            record.outcome = Some(reason.into());
+        }
+    }
+
+    pub(crate) fn set_outcome(&mut self, outcome: &str) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.outcome = Some(outcome.into());
+    }
+
+    pub(crate) fn set_unchanged_outcome(&mut self, plugin_owned: bool) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        let outcome = record
+            .rejection_reason
+            .as_deref()
+            .unwrap_or(if plugin_owned {
+                "already_correct"
+            } else {
+                "no_op"
+            });
+        record.outcome = Some(outcome.into());
+    }
+
+    pub(crate) fn set_initial_adoption_failure(&mut self) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.eligible = Some(false);
+        record.rejection_reason = Some(
+            record
+                .rejection_reason
+                .clone()
+                .unwrap_or_else(|| "process_or_naming_unavailable".into()),
+        );
+        record.outcome = record.rejection_reason.clone();
+    }
+
+    pub(crate) fn record_naming_pane(&mut self, pane_id: &str, reason: &str) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.selected_naming_pane = Some(pane_id.into());
+        record.naming_pane_reason = Some(reason.into());
+    }
+
+    pub(crate) fn record_process_info(&mut self, pane_id: &str, process_info: &PaneProcessInfo) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.process_info = Some(ProcessRecord::from_info(pane_id, process_info));
+        record.process_error = None;
+    }
+
+    pub(crate) fn record_process_error(&mut self, error: String) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.process_error = Some(error);
+        record.rejection_reason = Some("process_unavailable".into());
+        record.outcome = Some("process_unavailable".into());
+    }
+
+    pub(crate) fn record_representative(&mut self, process: &ProcessInfo) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.representative_process = Some(ProcessIdentity::from_process(process));
+    }
+
+    pub(crate) fn record_representative_selection(
+        &mut self,
+        process: &ProcessInfo,
+        reason: &str,
+        process_info: &PaneProcessInfo,
+        policy: &NamingPolicy,
+    ) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.representative_process = Some(ProcessIdentity::from_process(process));
+        record.representative_selection = Some(reason.into());
+        record.ignored_processes_skipped = process_info
+            .foreground_processes
+            .iter()
+            .filter(|candidate| policy.is_ignored_program(candidate.program()))
+            .map(ProcessIdentity::from_process)
+            .collect();
+    }
+
+    pub(crate) fn record_computed_base(&mut self, computed_base: Option<&str>) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.computed_base_label = computed_base.map(str::to_owned);
+    }
+
+    pub(crate) fn record_desired_label(&mut self, desired: &str) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.desired_label = Some(desired.into());
+    }
+
+    pub(crate) fn record_guarded_tab(&mut self, tab: &Tab) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.guarded_tab = Some(TabObservation {
+            tab_id: tab.tab_id.clone(),
+            workspace_id: tab.workspace_id.clone(),
+            label: tab.label.clone(),
+        });
+    }
+
+    pub(crate) fn record_rename_error(&mut self, error: String) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.rename_attempted = true;
+        record.rename_result = Some(format!("error: {error}"));
+        record.outcome = Some("rename_error".into());
+    }
+
+    pub(crate) fn record_guard_error(&mut self, error: String) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.rename_attempted = false;
+        record.rename_result = Some(format!("error: {error}"));
+        record.outcome = Some("guard_read_error".into());
+    }
+
+    pub(crate) fn record_rename_result(&mut self, result: &str, outcome: &str) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.rename_result = Some(result.into());
+        record.outcome = Some(outcome.into());
+    }
+
+    pub(crate) fn record_rename_success(&mut self) {
+        let Self::Recording(record) = self else {
+            return;
+        };
+        record.rename_attempted = true;
+        record.rename_result = Some("renamed".into());
+        record.outcome = Some("renamed".into());
+    }
+}
+
+impl DecisionRecord {
+    pub(crate) fn new(
         trigger: &str,
         path: &str,
         target_kind: &str,
@@ -256,7 +494,7 @@ impl DecisionRecord {
             target_scope,
             snapshot: None,
             pane_mapping: None,
-            candidates: Vec::new(),
+            tab_decisions: Vec::new(),
             lock: LockRecord::default(),
             rerun: RerunRecord {
                 handoff: "not_requested".into(),
@@ -268,11 +506,7 @@ impl DecisionRecord {
         }
     }
 
-    pub(crate) fn record_snapshot(
-        &mut self,
-        snapshot: &SessionSnapshot,
-        candidate_tab_ids: &[String],
-    ) {
+    fn record_snapshot(&mut self, snapshot: &SessionSnapshot, candidate_tab_ids: &[String]) {
         let tabs = snapshot
             .tabs
             .iter()
@@ -320,83 +554,20 @@ impl DecisionRecord {
         };
     }
 
-    pub(crate) fn new_candidate(
-        &self,
-        tab: &Tab,
-        ownership: Option<TabOwnership>,
-        pane_count: usize,
-        focused: bool,
-    ) -> CandidateRecord {
-        CandidateRecord {
-            tab_id: tab.tab_id.clone(),
-            workspace_id: tab.workspace_id.clone(),
-            label: tab.label.clone(),
-            pane_count,
-            focused,
-            ownership_before: ownership,
-            ..CandidateRecord::default()
-        }
-    }
-
-    pub(crate) fn push_candidate(&mut self, candidate: CandidateRecord) {
-        self.candidates.push(candidate);
-    }
-
-    pub(crate) fn record_pane_mapping(
-        &mut self,
-        pane_id: &str,
-        mapped_tab_id: Option<&str>,
-        resolution: &str,
-        validation: &str,
-        consumed: bool,
-    ) {
-        self.pane_mapping = Some(PaneMappingRecord {
-            pane_id: pane_id.into(),
-            mapped_tab_id: mapped_tab_id.map(str::to_owned),
-            resolution: resolution.into(),
-            validation: validation.into(),
-            consumed,
-        });
-    }
-
-    pub(crate) fn record_lock_attempt(&mut self, phase: &str, result: &str, wait_ns: u64) {
-        self.lock.attempts.push(LockAttempt {
-            phase: phase.into(),
-            result: result.into(),
-            wait_ns,
-        });
-    }
-
-    pub(crate) fn record_rerun_requested(&mut self) {
-        self.rerun.requested = true;
-        self.rerun.handoff = "requested".into();
-    }
-
-    pub(crate) fn record_handoff(&mut self, outcome: &str) {
-        self.rerun.handoff = outcome.into();
-    }
-
-    pub(crate) fn set_terminal_outcome(&mut self, outcome: &str) {
-        self.terminal_outcome = outcome.into();
-        if outcome == "lock_dropped" {
-            self.lock.benign_timeout_or_drop = true;
-        }
-    }
-
     pub(crate) fn finish(&mut self, result: &Result<()>) {
         self.finished_monotonic_ns = Some(monotonic_ns());
         match result {
             Ok(()) => {
                 self.process_status = "success".into();
                 if self.terminal_outcome == "pending" {
-                    self.terminal_outcome = terminal_outcome(&self.candidates);
+                    self.terminal_outcome = terminal_outcome(&self.tab_decisions);
                 }
             }
             Err(error) => {
                 self.process_status = "error".into();
                 self.process_error = Some(error.to_string());
                 if self.terminal_outcome == "pending" {
-                    self.terminal_outcome = terminal_outcome(&self.candidates);
+                    self.terminal_outcome = terminal_outcome(&self.tab_decisions);
                     if self.terminal_outcome == "no_candidate_tabs" {
                         self.terminal_outcome = "error".into();
                     }
@@ -406,14 +577,14 @@ impl DecisionRecord {
     }
 
     /// Emits one JSON line through the existing plugin command log stream.
-    pub(crate) fn emit(&self) {
+    fn emit(&self) {
         if let Ok(line) = serde_json::to_string(self) {
             eprintln!("{line}");
         }
     }
 }
 
-fn terminal_outcome(candidates: &[CandidateRecord]) -> String {
+fn terminal_outcome(candidates: &[TabDecisionRecord]) -> String {
     let mut outcomes = candidates
         .iter()
         .filter_map(|candidate| candidate.outcome.as_deref())
@@ -458,22 +629,6 @@ fn basename(value: &str) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or(value)
         .to_owned()
-}
-
-fn invocation_workspace(invocation: &Invocation) -> Option<String> {
-    match invocation {
-        Invocation::Workspace(workspace_id)
-        | Invocation::ClosedPane { workspace_id, .. }
-        | Invocation::Tab { workspace_id, .. } => Some(workspace_id.clone()),
-        _ => None,
-    }
-}
-
-fn invocation_tab(invocation: &Invocation) -> Option<String> {
-    match invocation {
-        Invocation::Tab { tab_id, .. } => Some(tab_id.clone()),
-        _ => None,
-    }
 }
 
 fn monotonic_ns() -> u64 {

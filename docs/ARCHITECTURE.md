@@ -38,18 +38,22 @@ for different reasons. Recovery actions can also bypass malformed user settings.
 ## Application Layer
 
 - `runner.rs` owns invocation timing, close settling, locking, exact-operation
-  serialization, structural event coalescing, and the total per-process pass
-  budget.
+  serialization, structural event coalescing, the total per-process pass budget,
+  and the `Telemetry` lifecycle. Telemetry is either `Off` or `Recording`; the
+  runner creates, replaces, finishes, and emits each invocation record.
 - `reconciliation.rs` is the reconciliation façade. It owns pass coordination,
   snapshots, pane-map refresh and consumption, persistence, target iteration,
   candidate lifecycle, recovery, toggles, naming policy, and shell fallback.
 - `process_selection.rs` selects a representative process from one pane's
-  foreground group, including preferred agents and ignored-process handling.
+  foreground group, including preferred agents and ignored-process filtering.
+  Selection is independent of telemetry; `TabTelemetry` records ignored
+  processes only when recording is enabled.
 - `targeting.rs` derives tab/pane targets and validates closed-pane mappings from
   authoritative snapshots.
 - `tab_reconciliation.rs` applies one coherent tab observation to ownership and
-  labels. It combines naming and numbering into one desired label and re-reads
-  the tab before mutation.
+  labels. It combines naming and numbering into one desired label, re-reads the
+  tab before mutation, and receives a `TabTelemetry` mode rather than an
+  optional trace.
 
 Keeping scheduling out of reconciliation prevents lock lifecycle and shell-hook
 ordering from obscuring label ownership rules.

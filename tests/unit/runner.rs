@@ -198,8 +198,11 @@ fn disabled_diagnostic_telemetry_builds_no_record() {
         ..config.settings
     };
 
-    assert!(DecisionRecord::from_config(&config).is_none());
-    assert!(DecisionRecord::from_invocation(&config, &config.invocation).is_none());
+    assert!(matches!(telemetry_from_config(&config), Telemetry::Off));
+    assert!(matches!(
+        telemetry_from_invocation(&config, &config.invocation),
+        Telemetry::Off
+    ));
 }
 
 #[test]
@@ -213,8 +216,14 @@ fn enabled_diagnostic_telemetry_builds_the_existing_record() {
         },
     );
 
-    assert!(DecisionRecord::from_config(&config).is_some());
-    assert!(DecisionRecord::from_invocation(&config, &config.invocation).is_some());
+    assert!(matches!(
+        telemetry_from_config(&config),
+        Telemetry::Recording(_)
+    ));
+    assert!(matches!(
+        telemetry_from_invocation(&config, &config.invocation),
+        Telemetry::Recording(_)
+    ));
 }
 
 #[test]
@@ -264,7 +273,7 @@ fn coalescing_consumes_a_rerun_requested_during_the_first_pass() {
     let mut client = FakeClient::with_tab(None);
     client.rerun_on_first_snapshot = Some(directory.0.clone());
     let mut remaining_passes = MAX_RECONCILIATION_PASSES;
-    let mut telemetry = None;
+    let mut telemetry = Telemetry::Off;
 
     run_coalesced_passes(
         &config,
@@ -287,7 +296,7 @@ fn continuous_reruns_stop_at_the_process_pass_budget() {
     let mut client = FakeClient::with_tab(None);
     client.rerun_on_every_snapshot = Some(directory.0.clone());
     let mut remaining_passes = MAX_RECONCILIATION_PASSES;
-    let mut telemetry = None;
+    let mut telemetry = Telemetry::Off;
 
     run_coalesced_passes(
         &config,
@@ -311,7 +320,7 @@ fn handoff_uses_only_the_remaining_process_pass_budget() {
     client.rerun_on_every_snapshot = Some(directory.0.clone());
     ReconciliationLock::request_rerun(&directory.0, &Invocation::Full).unwrap();
     let mut remaining_passes = 2;
-    let mut telemetry = None;
+    let mut telemetry = Telemetry::Off;
 
     handoff_after_release(&config, &mut client, &mut remaining_passes, &mut telemetry).unwrap();
 
@@ -337,7 +346,7 @@ fn successful_handoff_executes_all_pending_requesters() {
     ReconciliationLock::request_rerun(&directory.0, &Invocation::Full).unwrap();
     ReconciliationLock::request_rerun(&directory.0, &second).unwrap();
     let mut remaining_passes = 4;
-    let mut telemetry = None;
+    let mut telemetry = Telemetry::Off;
 
     handoff_after_release(&config, &mut client, &mut remaining_passes, &mut telemetry).unwrap();
 
@@ -357,7 +366,7 @@ fn malformed_consumed_rerun_finishes_its_close_record_before_returning_error() {
     let mut client = FakeClient::with_tab(None);
     client.invalid_rerun_on_first_snapshot = Some(directory.0.clone());
     let mut remaining_passes = 2;
-    let mut telemetry = DecisionRecord::from_invocation(&config, &invocation);
+    let mut telemetry = telemetry_from_invocation(&config, &invocation);
 
     let error = run_coalesced_passes(
         &config,
@@ -369,7 +378,7 @@ fn malformed_consumed_rerun_finishes_its_close_record_before_returning_error() {
     .unwrap_err();
 
     assert!(!error.to_string().is_empty());
-    assert!(telemetry.is_none());
+    assert!(matches!(telemetry, Telemetry::Off));
 }
 
 #[test]

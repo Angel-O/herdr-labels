@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 use crate::config::{Config, Invocation};
 use crate::herdr::HerdrClient;
 use crate::lock::ReconciliationLock;
-use crate::reconciliation::{TabClient, pane_matches_program, run_pass_with_telemetry};
+use crate::reconciliation::{TabClient, pane_matches_program, run_pass};
 use crate::state::{State, TabOwnership};
-use crate::telemetry::DecisionRecord;
+use crate::telemetry::{DecisionRecord, Telemetry};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -30,13 +30,13 @@ const MAX_RECONCILIATION_PASSES: usize = 8;
 
 /// Runs one invocation, preserving exact operations and coalescing structural events.
 pub(crate) fn run(config: Config) -> Result<()> {
-    let mut telemetry = DecisionRecord::from_config(&config);
+    let mut telemetry = telemetry_from_config(&config);
     let result = run_inner(&config, &mut telemetry);
-    finish_record(&mut telemetry, &result);
+    telemetry.finish_and_emit(&result);
     result
 }
 
-fn run_inner(config: &Config, telemetry: &mut Option<DecisionRecord>) -> Result<()> {
+fn run_inner(config: &Config, telemetry: &mut Telemetry) -> Result<()> {
     let mut client = HerdrClient::new(&config.socket_path);
     if let Invocation::ClosedTab {
         tab_id: Some(tab_id),
@@ -47,9 +47,7 @@ fn run_inner(config: &Config, telemetry: &mut Option<DecisionRecord>) -> Result<
     }
     if matches!(config.invocation, Invocation::Preexec { .. }) {
         let Some(probe) = ReconciliationLock::try_acquire(&config.state_dir)? else {
-            if let Some(record) = telemetry.as_mut() {
-                record.set_terminal_outcome("lock_dropped");
-            }
+            telemetry.set_terminal_outcome("lock_dropped");
             return Ok(());
         };
         // Settling must not hold the session lock: a newer prompt update needs
@@ -77,25 +75,19 @@ fn run_inner(config: &Config, telemetry: &mut Option<DecisionRecord>) -> Result<
         let started = Instant::now();
         let lock = match ReconciliationLock::acquire_with_timeout(&config.state_dir, timeout) {
             Ok(lock) => {
-                if let Some(record) = telemetry.as_mut() {
-                    record.record_lock_attempt("exact", "acquired", elapsed_ns(started));
-                }
+                telemetry.record_lock_attempt("exact", "acquired", elapsed_ns(started));
                 lock
             }
             Err(error)
                 if error.kind() == std::io::ErrorKind::TimedOut
                     && timeout_is_benign(&config.invocation) =>
             {
-                if let Some(record) = telemetry.as_mut() {
-                    record.record_lock_attempt("exact", "timeout", elapsed_ns(started));
-                    record.set_terminal_outcome("lock_dropped");
-                }
+                telemetry.record_lock_attempt("exact", "timeout", elapsed_ns(started));
+                telemetry.set_terminal_outcome("lock_dropped");
                 return Ok(());
             }
             Err(error) => {
-                if let Some(record) = telemetry.as_mut() {
-                    record.record_lock_attempt("exact", "error", elapsed_ns(started));
-                }
+                telemetry.record_lock_attempt("exact", "error", elapsed_ns(started));
                 return Err(error.into());
             }
         };
@@ -114,45 +106,33 @@ fn run_inner(config: &Config, telemetry: &mut Option<DecisionRecord>) -> Result<
     let started = Instant::now();
     let lock = match ReconciliationLock::try_acquire(&config.state_dir)? {
         Some(lock) => {
-            if let Some(record) = telemetry.as_mut() {
-                record.record_lock_attempt("try", "acquired", elapsed_ns(started));
-            }
+            telemetry.record_lock_attempt("try", "acquired", elapsed_ns(started));
             lock
         }
         None => {
-            if let Some(record) = telemetry.as_mut() {
-                record.record_lock_attempt("try", "busy", elapsed_ns(started));
-            }
+            telemetry.record_lock_attempt("try", "busy", elapsed_ns(started));
             if is_owned_rename_event(config, &mut client)? {
-                if let Some(record) = telemetry.as_mut() {
-                    record.set_terminal_outcome("owned_rename_noop");
-                }
+                telemetry.set_terminal_outcome("owned_rename_noop");
                 return Ok(());
             }
             ReconciliationLock::request_rerun(&config.state_dir, &config.invocation)?;
-            if let Some(record) = telemetry.as_mut() {
-                record.record_rerun_requested();
-                record.record_lock_attempt("queue", "published", 0);
-                record.record_handoff("queued");
-                record.set_terminal_outcome("queued");
-            }
+            telemetry.record_rerun_requested();
+            telemetry.record_lock_attempt("queue", "published", 0);
+            telemetry.record_handoff("queued");
+            telemetry.set_terminal_outcome("queued");
             let queued = Ok(());
-            finish_record(telemetry, &queued);
+            telemetry.finish_and_emit(&queued);
             let started = Instant::now();
             let Some(lock) = ReconciliationLock::try_acquire(&config.state_dir)? else {
-                if let Some(record) = telemetry.as_mut() {
-                    record.record_lock_attempt("handoff", "busy", elapsed_ns(started));
-                }
+                telemetry.record_lock_attempt("handoff", "busy", elapsed_ns(started));
                 return Ok(());
             };
             handoff = ReconciliationLock::take_rerun(&config.state_dir)?;
             if let Some(requested) = handoff.as_ref() {
-                *telemetry = DecisionRecord::from_invocation(config, requested);
-                if let Some(record) = telemetry.as_mut() {
-                    record.record_rerun_requested();
-                    record.record_lock_attempt("handoff", "acquired", elapsed_ns(started));
-                    record.record_handoff("deferred_consumed");
-                }
+                *telemetry = telemetry_from_invocation(config, requested);
+                telemetry.record_rerun_requested();
+                telemetry.record_lock_attempt("handoff", "acquired", elapsed_ns(started));
+                telemetry.record_handoff("deferred_consumed");
             }
             lock
         }
@@ -220,43 +200,35 @@ fn handoff_after_release(
     config: &Config,
     client: &mut impl TabClient,
     remaining_passes: &mut usize,
-    telemetry: &mut Option<DecisionRecord>,
+    telemetry: &mut Telemetry,
 ) -> Result<()> {
     if *remaining_passes == 0 || !ReconciliationLock::rerun_requested(&config.state_dir)? {
-        if let Some(record) = telemetry.as_mut() {
-            record.record_handoff("not_needed");
-        }
+        telemetry.record_handoff("not_needed");
         return Ok(());
     }
     let started = Instant::now();
     let Some(lock) = ReconciliationLock::try_acquire(&config.state_dir)? else {
-        if let Some(record) = telemetry.as_mut() {
-            record.record_lock_attempt("post_release", "busy", elapsed_ns(started));
-            record.record_handoff("busy");
-        }
+        telemetry.record_lock_attempt("post_release", "busy", elapsed_ns(started));
+        telemetry.record_handoff("busy");
         return Ok(());
     };
     let requested = match ReconciliationLock::take_rerun(&config.state_dir) {
         Ok(Some(requested)) => requested,
         Ok(None) => {
-            if let Some(record) = telemetry.as_mut() {
-                record.record_lock_attempt("post_release", "acquired", elapsed_ns(started));
-                record.record_handoff("empty");
-            }
+            telemetry.record_lock_attempt("post_release", "acquired", elapsed_ns(started));
+            telemetry.record_handoff("empty");
             return Ok(());
         }
         Err(error) => {
             let result: Result<()> = Err(error.into());
-            finish_record(telemetry, &result);
+            telemetry.finish_and_emit(&result);
             return result;
         }
     };
-    *telemetry = DecisionRecord::from_invocation(config, &requested);
-    if let Some(record) = telemetry.as_mut() {
-        record.record_rerun_requested();
-        record.record_lock_attempt("post_release", "acquired", elapsed_ns(started));
-        record.record_handoff("deferred_consumed");
-    }
+    *telemetry = telemetry_from_invocation(config, &requested);
+    telemetry.record_rerun_requested();
+    telemetry.record_lock_attempt("post_release", "acquired", elapsed_ns(started));
+    telemetry.record_handoff("deferred_consumed");
     run_coalesced_passes(config, &requested, client, remaining_passes, telemetry)?;
     drop(lock);
     Ok(())
@@ -282,64 +254,143 @@ fn run_coalesced_passes(
     initial: &Invocation,
     client: &mut impl TabClient,
     remaining_passes: &mut usize,
-    telemetry: &mut Option<DecisionRecord>,
+    telemetry: &mut Telemetry,
 ) -> Result<()> {
     let mut deferred = initial.clone();
     let mut invocation = &deferred;
     while *remaining_passes > 0 {
         *remaining_passes -= 1;
-        let mut record = telemetry
-            .take()
-            .or_else(|| DecisionRecord::from_invocation(config, invocation));
-        let pass_result = run_pass_with_telemetry(config, invocation, client, record.as_mut());
+        let mut pass_telemetry = std::mem::replace(telemetry, Telemetry::Off);
+        if matches!(pass_telemetry, Telemetry::Off) {
+            pass_telemetry = telemetry_from_invocation(config, invocation);
+        }
+        let pass_result = run_pass(config, invocation, client, &mut pass_telemetry);
         if let Err(error) = pass_result {
             let result: Result<()> = Err(error);
-            finish_record(&mut record, &result);
+            pass_telemetry.finish_and_emit(&result);
             return result;
         }
         if *remaining_passes == 0 {
             // Preserve a final marker for the next real event rather than
             // extending this process through another unbounded batch.
-            finish_record(&mut record, &Ok(()));
+            pass_telemetry.finish_and_emit(&Ok(()));
             break;
         }
         let requested = match ReconciliationLock::take_rerun(&config.state_dir) {
             Ok(Some(requested)) => requested,
             Ok(None) => {
-                finish_record(&mut record, &Ok(()));
+                pass_telemetry.finish_and_emit(&Ok(()));
                 break;
             }
             Err(error) => {
                 let result: Result<()> = Err(error.into());
-                finish_record(&mut record, &result);
+                pass_telemetry.finish_and_emit(&result);
                 return result;
             }
         };
-        if let Some(record) = record.as_mut() {
-            record.record_rerun_requested();
-            record.record_handoff("deferred_published");
-        }
-        finish_record(&mut record, &Ok(()));
+        pass_telemetry.record_rerun_requested();
+        pass_telemetry.record_handoff("deferred_published");
+        pass_telemetry.finish_and_emit(&Ok(()));
         deferred = requested;
         invocation = &deferred;
-        *telemetry = DecisionRecord::from_invocation(config, invocation);
-        if let Some(record) = telemetry.as_mut() {
-            record.record_rerun_requested();
-            record.record_handoff("deferred_consumed");
-        }
+        *telemetry = telemetry_from_invocation(config, invocation);
+        telemetry.record_rerun_requested();
+        telemetry.record_handoff("deferred_consumed");
     }
     Ok(())
 }
 
-fn finish_record(record: &mut Option<DecisionRecord>, result: &Result<()>) {
-    if let Some(mut record) = record.take() {
-        record.finish(result);
-        record.emit();
+fn elapsed_ns(started: Instant) -> u64 {
+    started.elapsed().as_nanos().min(u64::MAX as u128) as u64
+}
+
+pub(crate) fn telemetry_from_config(config: &Config) -> Telemetry {
+    if !config.settings.diagnostic_telemetry {
+        return Telemetry::Off;
+    }
+    let (trigger, path, target_kind) = match config.event.as_deref() {
+        Some("pane.closed") => ("pane.closed", "pane_closed", "workspace"),
+        Some("pane.focused" | "tab.focused")
+            if matches!(config.invocation, Invocation::Tab { .. }) =>
+        {
+            (config.event.as_deref().unwrap(), "focus_control", "tab")
+        }
+        _ if matches!(config.invocation, Invocation::ClosedPane { .. }) => {
+            ("pane.closed", "pane_closed", "workspace")
+        }
+        _ => return Telemetry::Off,
+    };
+    let workspace_id = config
+        .event_workspace_id
+        .clone()
+        .or_else(|| invocation_workspace(&config.invocation));
+    let event_pane_id = config.event_pane_id.clone().or_else(|| {
+        if let Invocation::ClosedPane { pane_id, .. } = &config.invocation {
+            Some(pane_id.clone())
+        } else {
+            None
+        }
+    });
+    let event_tab_id = config
+        .event_tab_id
+        .clone()
+        .or_else(|| invocation_tab(&config.invocation));
+    Telemetry::Recording(Box::new(DecisionRecord::new(
+        trigger,
+        path,
+        target_kind,
+        workspace_id,
+        event_pane_id,
+        event_tab_id,
+    )))
+}
+
+pub(crate) fn telemetry_from_invocation(config: &Config, invocation: &Invocation) -> Telemetry {
+    if !config.settings.diagnostic_telemetry {
+        return Telemetry::Off;
+    }
+    let (trigger, path, target_kind) = match invocation {
+        Invocation::ClosedPane { .. } => ("pane.closed", "pane_closed", "workspace"),
+        Invocation::Tab { .. }
+            if matches!(
+                config.event.as_deref(),
+                Some("pane.focused" | "tab.focused")
+            ) =>
+        {
+            (config.event.as_deref().unwrap(), "focus_control", "tab")
+        }
+        _ => return Telemetry::Off,
+    };
+    let workspace_id = invocation_workspace(invocation);
+    let event_pane_id = match invocation {
+        Invocation::ClosedPane { pane_id, .. } => Some(pane_id.clone()),
+        _ => config.event_pane_id.clone(),
+    };
+    let event_tab_id = invocation_tab(invocation);
+    Telemetry::Recording(Box::new(DecisionRecord::new(
+        trigger,
+        path,
+        target_kind,
+        workspace_id,
+        event_pane_id,
+        event_tab_id,
+    )))
+}
+
+fn invocation_workspace(invocation: &Invocation) -> Option<String> {
+    match invocation {
+        Invocation::Workspace(workspace_id)
+        | Invocation::ClosedPane { workspace_id, .. }
+        | Invocation::Tab { workspace_id, .. } => Some(workspace_id.clone()),
+        _ => None,
     }
 }
 
-fn elapsed_ns(started: Instant) -> u64 {
-    started.elapsed().as_nanos().min(u64::MAX as u128) as u64
+fn invocation_tab(invocation: &Invocation) -> Option<String> {
+    match invocation {
+        Invocation::Tab { tab_id, .. } => Some(tab_id.clone()),
+        _ => None,
+    }
 }
 
 fn wait_until_closed(

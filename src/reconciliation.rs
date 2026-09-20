@@ -11,8 +11,8 @@ use crate::process_selection::process_group_matches_program;
 use crate::settings::Settings;
 use crate::state::{State, TabOwnership};
 use crate::tab_reconciliation::reconcile_tab;
-use crate::targeting::{resolve_closed_pane, scoped_closed_pane_tabs, scoped_tabs, tab_positions};
-use crate::telemetry::DecisionRecord;
+use crate::targeting::{resolve_closed_pane, scoped_closed_pane_tabs, scoped_tabs};
+use crate::telemetry::Telemetry;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -41,24 +41,12 @@ impl TabClient for HerdrClient {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn run_pass(
     config: &Config,
     invocation: &Invocation,
     client: &mut impl TabClient,
+    telemetry: &mut Telemetry,
 ) -> Result<()> {
-    run_pass_with_telemetry(config, invocation, client, None)
-}
-
-pub(crate) fn run_pass_with_telemetry(
-    config: &Config,
-    invocation: &Invocation,
-    client: &mut impl TabClient,
-    mut telemetry: Option<&mut DecisionRecord>,
-) -> Result<()> {
-    if !config.settings.diagnostic_telemetry {
-        telemetry = None;
-    }
     let mut state = State::load(&config.state_dir)?;
     match invocation {
         Invocation::Clear => return clear_session(client, &mut state),
@@ -74,9 +62,7 @@ pub(crate) fn run_pass_with_telemetry(
             state.persist()?;
         }
         _ if state.is_suspended() => {
-            if let Some(record) = telemetry.as_deref_mut() {
-                record.set_terminal_outcome("suspended");
-            }
+            telemetry.set_terminal_outcome("suspended");
             return Ok(());
         }
         _ => {}
@@ -105,20 +91,16 @@ pub(crate) fn run_pass_with_telemetry(
     if let (Invocation::ClosedPane { pane_id, .. }, Some(resolution)) =
         (invocation, closed_resolution.as_ref())
     {
-        if let Some(record) = telemetry.as_deref_mut() {
-            record.record_pane_mapping(
-                pane_id,
-                resolution.mapped_tab_id.as_deref(),
-                resolution.resolution,
-                resolution.validation,
-                resolution.valid,
-            );
-        }
+        telemetry.record_pane_mapping(
+            pane_id,
+            resolution.mapped_tab_id.as_deref(),
+            resolution.resolution,
+            resolution.validation,
+            resolution.valid,
+        );
         if !resolution.valid {
-            if let Some(record) = telemetry.as_deref_mut() {
-                record.record_snapshot(&snapshot, &[]);
-                record.set_terminal_outcome(resolution.outcome);
-            }
+            telemetry.record_snapshot(&snapshot, &[]);
+            telemetry.set_terminal_outcome(resolution.outcome);
             state.persist()?;
             return Ok(());
         }
@@ -133,48 +115,34 @@ pub(crate) fn run_pass_with_telemetry(
         toggle_ownership(&snapshot, &mut state, tab_id);
         state.persist()?;
     }
-    let policy = naming_policy(&config.settings);
-    let fallback_shell = fallback_shell();
     let targets = if let Some(resolution) = closed_resolution.as_ref() {
         scoped_closed_pane_tabs(&snapshot, invocation, resolution.mapped_tab_id.as_deref())
     } else {
         scoped_tabs(&snapshot, invocation)
     };
-    let positions = tab_positions(&snapshot);
-
-    if let Some(record) = telemetry.as_deref_mut() {
-        let target_ids = targets
-            .iter()
-            .map(|target| target.tab.tab_id.clone())
-            .collect::<Vec<_>>();
-        record.record_snapshot(&snapshot, &target_ids);
-    }
+    let target_ids = targets
+        .iter()
+        .map(|target| target.tab.tab_id.clone())
+        .collect::<Vec<_>>();
+    telemetry.record_snapshot(&snapshot, &target_ids);
 
     for session_tab in targets {
-        let position = positions[&session_tab.tab.tab_id];
-        let mut candidate = telemetry.as_ref().map(|record| {
-            record.new_candidate(
-                &session_tab.tab,
-                state.ownership(&session_tab.tab.tab_id).cloned(),
-                session_tab.pane_count,
-                session_tab.focused,
-            )
-        });
+        let mut tab_telemetry = telemetry.new_tab_decision(
+            &session_tab.tab,
+            state.ownership(&session_tab.tab.tab_id).cloned(),
+            session_tab.pane_count,
+            session_tab.focused,
+        );
         let result = reconcile_tab(
             client,
             &snapshot,
             session_tab,
-            position,
             invocation,
-            &config.settings,
-            &policy,
-            &fallback_shell,
+            config,
             &mut state,
-            candidate.as_mut(),
+            &mut tab_telemetry,
         );
-        if let (Some(record), Some(candidate)) = (telemetry.as_deref_mut(), candidate) {
-            record.push_candidate(candidate);
-        }
+        telemetry.push_tab_decision(tab_telemetry);
         result?;
     }
 
@@ -247,7 +215,7 @@ fn toggle_ownership(snapshot: &SessionSnapshot, state: &mut State, tab_id: &str)
     );
 }
 
-fn naming_policy(settings: &Settings) -> NamingPolicy {
+pub(crate) fn naming_policy(settings: &Settings) -> NamingPolicy {
     NamingPolicy {
         hide_idle_shell: settings.hide_idle_shell,
         max_label_chars: settings.max_label_chars,
@@ -259,16 +227,6 @@ fn naming_policy(settings: &Settings) -> NamingPolicy {
             .collect::<HashSet<_>>(),
         aliases: settings.process_aliases.clone(),
     }
-}
-
-fn fallback_shell() -> String {
-    std::env::var("SHELL")
-        .ok()
-        .as_deref()
-        .and_then(|shell| shell.rsplit('/').next())
-        .filter(|shell| !shell.is_empty())
-        .unwrap_or("zsh")
-        .to_owned()
 }
 
 #[cfg(test)]

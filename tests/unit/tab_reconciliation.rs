@@ -3,12 +3,12 @@ use std::error::Error;
 
 use super::*;
 use crate::config::Invocation;
-use crate::herdr::{PaneInfo, ProcessInfo};
+use crate::herdr::{PaneInfo, PaneProcessInfo, ProcessInfo};
 use crate::naming::NamingPolicy;
 use crate::numbering::Tab;
 use crate::reconciliation::TabClient;
 use crate::settings::Settings;
-use crate::telemetry::CandidateRecord;
+use crate::telemetry::TabTelemetry;
 
 struct FakeClient {
     processes: HashMap<String, PaneProcessInfo>,
@@ -95,6 +95,7 @@ fn ignored_preexec_uses_the_hook_shell_not_the_login_shell() {
     let mut client = FakeClient {
         processes: HashMap::from([("w1:t1:pane".into(), process_info("git"))]),
     };
+    let mut telemetry = TabTelemetry::Off;
     let policy = policy(&Settings::default());
     let invocation = Invocation::Preexec {
         pane_id: "w1:t1:pane".into(),
@@ -110,7 +111,7 @@ fn ignored_preexec_uses_the_hook_shell_not_the_login_shell() {
             &invocation,
             &policy,
             "zsh",
-            false,
+            &mut telemetry,
         )
         .unwrap(),
         Some("bash".into())
@@ -124,6 +125,7 @@ fn ambient_ignored_program_does_not_guess_the_active_shell() {
     let mut client = FakeClient {
         processes: HashMap::from([("w1:t1:pane".into(), process_info("git"))]),
     };
+    let mut telemetry = TabTelemetry::Off;
     let policy = policy(&Settings::default());
 
     assert_eq!(
@@ -134,10 +136,46 @@ fn ambient_ignored_program_does_not_guess_the_active_shell() {
             &Invocation::Full,
             &policy,
             "zsh",
-            false,
+            &mut telemetry,
         )
         .unwrap(),
         None
+    );
+}
+
+#[test]
+fn unchanged_owned_label_preserves_a_naming_rejection_outcome() {
+    let session_tab = tab();
+    let session = snapshot(session_tab.clone());
+    let mut client = FakeClient {
+        processes: HashMap::from([("w1:t1:pane".into(), process_info("git"))]),
+    };
+    let policy = policy(&Settings::default());
+    let mut telemetry = TabTelemetry::Recording(Box::default());
+
+    assert_eq!(
+        computed_name(
+            &mut client,
+            &session,
+            &session_tab,
+            &Invocation::Full,
+            &policy,
+            "zsh",
+            &mut telemetry,
+        )
+        .unwrap(),
+        None
+    );
+    telemetry.set_unchanged_outcome(true);
+
+    let decision = telemetry.recording_mut();
+    assert_eq!(
+        decision.rejection_reason.as_deref(),
+        Some("no_representative_process")
+    );
+    assert_eq!(
+        decision.outcome.as_deref(),
+        Some("no_representative_process")
     );
 }
 
@@ -170,28 +208,30 @@ fn ignored_selection_is_recorded_only_when_trace_is_enabled() {
             },
         )]),
     };
-    let mut trace = CandidateRecord::default();
+    let mut telemetry = TabTelemetry::Recording(Box::default());
 
-    let name = computed_name_with_trace(
+    let name = computed_name(
         &mut client,
         &session,
         &session_tab,
         &Invocation::Full,
         &policy,
         "zsh",
-        false,
-        Some(&mut trace),
+        &mut telemetry,
     )
     .unwrap();
 
     assert_eq!(name.as_deref(), Some("zsh"));
     assert_eq!(
-        trace.representative_selection.as_deref(),
+        telemetry
+            .recording_mut()
+            .representative_selection
+            .as_deref(),
         Some("shell_leader_fallback")
     );
-    assert_eq!(trace.ignored_processes_skipped.len(), 1);
+    assert_eq!(telemetry.recording_mut().ignored_processes_skipped.len(), 1);
     assert_eq!(
-        trace.ignored_processes_skipped[0].executable_basename,
+        telemetry.recording_mut().ignored_processes_skipped[0].executable_basename,
         "starship"
     );
 }
