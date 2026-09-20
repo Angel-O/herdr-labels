@@ -12,9 +12,12 @@ shell hooks / Herdr events
             |
           runner
             |
-      reconciliation
-       /     |      \
-  naming  numbering  state
+       reconciliation
+       /      |       \
+ process  targeting  tab
+ selection           reconciliation
+        \      |      /
+     naming  numbering  state
             |
            herdr
 
@@ -37,9 +40,16 @@ for different reasons. Recovery actions can also bypass malformed user settings.
 - `runner.rs` owns invocation timing, close settling, locking, exact-operation
   serialization, structural event coalescing, and the total per-process pass
   budget.
-- `reconciliation.rs` applies one coherent session observation to ownership and
-  labels. It combines naming and numbering into one desired tab label and
-  re-reads the tab before mutation.
+- `reconciliation.rs` is the reconciliation façade. It owns pass coordination,
+  snapshots, pane-map refresh and consumption, persistence, target iteration,
+  candidate lifecycle, recovery, toggles, naming policy, and shell fallback.
+- `process_selection.rs` selects a representative process from one pane's
+  foreground group, including preferred agents and ignored-process handling.
+- `targeting.rs` derives tab/pane targets and validates closed-pane mappings from
+  authoritative snapshots.
+- `tab_reconciliation.rs` applies one coherent tab observation to ownership and
+  labels. It combines naming and numbering into one desired label and re-reads
+  the tab before mutation.
 
 Keeping scheduling out of reconciliation prevents lock lifecycle and shell-hook
 ordering from obscuring label ownership rules.
@@ -66,9 +76,11 @@ reimplementing path-safety rules at each caller.
 ## Tests
 
 Production modules declare external `tests` submodules whose source lives under
-`tests/unit/`. This keeps private-unit coverage without placing hundreds of test
-lines beside production logic. Repository-level manifest and shell integration
-tests remain directly under `tests/`.
+`tests/unit/`. Reconciliation-specific unit coverage follows the production
+topology in `process_selection.rs`, `targeting.rs`, and
+`tab_reconciliation.rs`; façade tests remain in `reconciliation.rs`.
+Repository-level manifest and shell integration tests remain directly under
+`tests/`.
 
 Tests that start shells must isolate `HOME`, shell startup variables, Herdr
 context, and the invoked binary. They must never source a real installed hook or
