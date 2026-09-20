@@ -9,6 +9,7 @@ use crate::naming::{NamingPolicy, ObservedProcess};
 use crate::numbering::{Tab, is_placeholder, numbered_label, strip_numeric_prefix};
 use crate::settings::Settings;
 use crate::state::{State, TabOwnership};
+use crate::telemetry::{CandidateRecord, DecisionRecord, TabObservation};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -37,10 +38,20 @@ impl TabClient for HerdrClient {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn run_pass(
     config: &Config,
     invocation: &Invocation,
     client: &mut impl TabClient,
+) -> Result<()> {
+    run_pass_with_telemetry(config, invocation, client, None)
+}
+
+pub(crate) fn run_pass_with_telemetry(
+    config: &Config,
+    invocation: &Invocation,
+    client: &mut impl TabClient,
+    mut telemetry: Option<&mut DecisionRecord>,
 ) -> Result<()> {
     let mut state = State::load(&config.state_dir)?;
     match invocation {
@@ -56,7 +67,12 @@ pub(crate) fn run_pass(
             state.set_suspended(false);
             state.persist()?;
         }
-        _ if state.is_suspended() => return Ok(()),
+        _ if state.is_suspended() => {
+            if let Some(record) = telemetry.as_deref_mut() {
+                record.set_terminal_outcome("suspended");
+            }
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -75,9 +91,25 @@ pub(crate) fn run_pass(
     let targets = scoped_tabs(&snapshot, invocation);
     let positions = tab_positions(&snapshot);
 
+    if let Some(record) = telemetry.as_deref_mut() {
+        let target_ids = targets
+            .iter()
+            .map(|target| target.tab.tab_id.clone())
+            .collect::<Vec<_>>();
+        record.record_snapshot(&snapshot, &target_ids);
+    }
+
     for session_tab in targets {
         let position = positions[&session_tab.tab.tab_id];
-        reconcile_tab(
+        let mut candidate = telemetry.as_ref().map(|record| {
+            record.new_candidate(
+                &session_tab.tab,
+                state.ownership(&session_tab.tab.tab_id).cloned(),
+                session_tab.pane_count,
+                session_tab.focused,
+            )
+        });
+        let result = reconcile_tab(
             client,
             &snapshot,
             session_tab,
@@ -87,7 +119,12 @@ pub(crate) fn run_pass(
             &policy,
             &fallback_shell,
             &mut state,
-        )?;
+            candidate.as_mut(),
+        );
+        if let (Some(record), Some(candidate)) = (telemetry.as_deref_mut(), candidate) {
+            record.push_candidate(candidate);
+        }
+        result?;
     }
 
     if matches!(invocation, Invocation::Full) {
@@ -110,42 +147,6 @@ pub(crate) fn pane_matches_program(
         program,
         &naming_policy(settings),
     ))
-}
-
-/// Checks one post-close snapshot for a selectable, observable survivor.
-pub(crate) fn closed_pane_ready(
-    client: &mut impl TabClient,
-    invocation: &Invocation,
-    settings: &Settings,
-) -> Result<bool> {
-    if !matches!(invocation, Invocation::ClosedPane { .. }) {
-        return Ok(true);
-    }
-    let snapshot = client.snapshot()?;
-    let policy = naming_policy(settings);
-    let tabs = scoped_tabs(&snapshot, invocation);
-    if tabs.is_empty() {
-        return Ok(true);
-    }
-    let mut selected_pane = false;
-    for session_tab in tabs {
-        let Some(pane_id) = naming_pane(&snapshot, session_tab) else {
-            return Ok(false);
-        };
-        selected_pane = true;
-        let preferred_program = snapshot
-            .panes
-            .iter()
-            .find(|pane| pane.pane_id == pane_id)
-            .and_then(|pane| pane.agent.as_deref());
-        let Ok(process_info) = client.pane_process_info(pane_id) else {
-            return Ok(false);
-        };
-        if representative_process(&process_info, &policy, preferred_program).is_none() {
-            return Ok(false);
-        }
-    }
-    Ok(selected_pane)
 }
 
 fn clear_session(client: &mut impl TabClient, state: &mut State) -> Result<()> {
@@ -181,6 +182,7 @@ fn reconcile_tab(
     policy: &NamingPolicy,
     fallback_shell: &str,
     state: &mut State,
+    mut trace: Option<&mut CandidateRecord>,
 ) -> Result<()> {
     let tab = &session_tab.tab;
     let current_base = strip_numeric_prefix(&tab.label);
@@ -210,6 +212,13 @@ fn reconcile_tab(
             | Invocation::Precmd { .. }
     );
     if initial_adoption && !authoritative_initial_event {
+        trace_result(
+            trace.as_deref_mut(),
+            Some(false),
+            Some("initial_adoption_requires_authoritative_event"),
+            "no_op",
+        );
+        trace_ownership_after(trace.as_deref_mut(), state, &tab.tab_id);
         return Ok(());
     }
     if matches!(
@@ -220,6 +229,13 @@ fn reconcile_tab(
         }) if current_base != last_base || &tab.label != last_rendered
     ) {
         state.set_ownership(&tab.tab_id, TabOwnership::Manual);
+        trace_result(
+            trace.as_deref_mut(),
+            Some(false),
+            Some("manual_rename"),
+            "ownership_blocked",
+        );
+        trace_ownership_after(trace.as_deref_mut(), state, &tab.tab_id);
         return Ok(());
     }
     let eligible = if forced {
@@ -246,6 +262,12 @@ fn reconcile_tab(
             }
         }
     };
+    if let Some(trace) = trace.as_deref_mut() {
+        trace.eligible = Some(eligible);
+        if !eligible {
+            trace.rejection_reason = Some(rejection_reason(ownership.as_ref()));
+        }
+    }
 
     let own_rename_event = matches!(
         (invocation, ownership.as_ref()),
@@ -269,7 +291,7 @@ fn reconcile_tab(
         && (observes_process || matches!(ownership, Some(TabOwnership::ResetPending)))
         && !own_rename_event
     {
-        computed_name(
+        computed_name_with_trace(
             client,
             snapshot,
             session_tab,
@@ -277,11 +299,26 @@ fn reconcile_tab(
             policy,
             fallback_shell,
             false,
+            trace.as_deref_mut(),
         )?
     } else {
         None
     };
+    if let Some(trace) = trace.as_deref_mut() {
+        trace.computed_base_label = computed_base.clone();
+    }
     if initial_adoption && computed_base.is_none() {
+        if let Some(trace) = trace.as_deref_mut() {
+            trace.eligible = Some(false);
+            trace.rejection_reason = Some(
+                trace
+                    .rejection_reason
+                    .clone()
+                    .unwrap_or_else(|| "process_or_naming_unavailable".into()),
+            );
+            trace.outcome = trace.rejection_reason.clone();
+        }
+        trace_ownership_after(trace.as_deref_mut(), state, &tab.tab_id);
         return Ok(());
     }
     let owned_base = if eligible {
@@ -301,6 +338,9 @@ fn reconcile_tab(
     } else {
         desired_base.to_owned()
     };
+    if let Some(trace) = trace.as_deref_mut() {
+        trace.desired_label = Some(desired.clone());
+    }
     let plugin_owned = eligible && (computed_base.is_some() || owned_base.is_some());
 
     if desired != tab.label {
@@ -326,17 +366,64 @@ fn reconcile_tab(
             );
             state.persist()?;
         }
-        let Some(latest) = client.get_tab(&tab.tab_id)? else {
+        let latest = match client.get_tab(&tab.tab_id) {
+            Ok(latest) => latest,
+            Err(error) => {
+                trace_guard_error(trace.as_deref_mut(), error.to_string());
+                trace_ownership_after(trace.as_deref_mut(), state, &tab.tab_id);
+                return Err(error);
+            }
+        };
+        let Some(latest) = latest else {
+            if let Some(trace) = trace.as_deref_mut() {
+                trace.rename_result = Some("tab_not_found".into());
+                trace.outcome = Some("tab_missing".into());
+            }
+            trace_ownership_after(trace.as_deref_mut(), state, &tab.tab_id);
             return Ok(());
         };
+        if let Some(trace) = trace.as_deref_mut() {
+            trace.guarded_tab = Some(TabObservation {
+                tab_id: latest.tab_id.clone(),
+                workspace_id: latest.workspace_id.clone(),
+                label: latest.label.clone(),
+            });
+        }
         if latest.label != tab.label {
             if plugin_owned {
                 state.resolve_pending_rename(&tab.tab_id, &latest.label);
                 state.persist()?;
             }
+            if let Some(trace) = trace.as_deref_mut() {
+                trace.rename_result = Some("stale_guard".into());
+                trace.outcome = Some("stale_guard".into());
+            }
+            trace_ownership_after(trace.as_deref_mut(), state, &tab.tab_id);
             return Ok(());
         }
-        client.rename_tab(&tab.tab_id, &desired)?;
+        if let Err(error) = client.rename_tab(&tab.tab_id, &desired) {
+            trace_rename_error(trace.as_deref_mut(), error.to_string());
+            trace_ownership_after(trace.as_deref_mut(), state, &tab.tab_id);
+            return Err(error);
+        }
+        if let Some(trace) = trace.as_deref_mut() {
+            trace.rename_attempted = true;
+            trace.rename_result = Some("renamed".into());
+            trace.outcome = Some("renamed".into());
+        }
+    } else if let Some(trace) = trace.as_deref_mut() {
+        trace.outcome = Some(
+            if let Some(reason) = trace.rejection_reason.as_deref() {
+                reason
+            } else if plugin_owned {
+                "already_correct"
+            } else if !eligible {
+                "ownership_blocked"
+            } else {
+                "no_op"
+            }
+            .into(),
+        );
     }
 
     if plugin_owned {
@@ -348,9 +435,11 @@ fn reconcile_tab(
             },
         );
     }
+    trace_ownership_after(trace, state, &tab.tab_id);
     Ok(())
 }
 
+#[allow(dead_code)]
 fn computed_name(
     client: &mut impl TabClient,
     snapshot: &SessionSnapshot,
@@ -360,6 +449,29 @@ fn computed_name(
     fallback_shell: &str,
     ambient_shell_only: bool,
 ) -> Result<Option<String>> {
+    computed_name_with_trace(
+        client,
+        snapshot,
+        tab,
+        invocation,
+        policy,
+        fallback_shell,
+        ambient_shell_only,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn computed_name_with_trace(
+    client: &mut impl TabClient,
+    snapshot: &SessionSnapshot,
+    tab: &SessionTab,
+    invocation: &Invocation,
+    policy: &NamingPolicy,
+    fallback_shell: &str,
+    ambient_shell_only: bool,
+    mut trace: Option<&mut CandidateRecord>,
+) -> Result<Option<String>> {
     match invocation {
         Invocation::Preexec {
             pane_id,
@@ -367,13 +479,22 @@ fn computed_name(
             program: Some(program),
             ..
         } if pane_targets_tab(snapshot, pane_id, &tab.tab.tab_id) => {
-            let Ok(process_info) = client.pane_process_info(pane_id) else {
+            trace_naming_pane(trace.as_deref_mut(), pane_id, "event_pane");
+            let process_info = match client.pane_process_info(pane_id) {
+                Ok(process_info) => process_info,
+                Err(error) => {
+                    trace_process_error(trace.as_deref_mut(), error.to_string());
+                    return Ok(None);
+                }
+            };
+            trace_process_info(trace.as_deref_mut(), pane_id, &process_info);
+            let Some(representative) = representative_process(&process_info, policy, None) else {
+                trace_rejection(trace.as_deref_mut(), "no_representative_process");
                 return Ok(None);
             };
-            let Some(_) = representative_process(&process_info, policy, None) else {
-                return Ok(None);
-            };
+            trace_representative(trace.as_deref_mut(), representative);
             if !process_group_matches_program(&process_info, program, policy) {
+                trace_rejection(trace.as_deref_mut(), "event_program_not_foreground");
                 return Ok(None);
             }
             Ok(Some(
@@ -399,35 +520,62 @@ fn computed_name(
             shell_pid,
             ..
         } if pane_targets_tab(snapshot, pane_id, &tab.tab.tab_id) => {
-            let Ok(process_info) = client.pane_process_info(pane_id) else {
-                return Ok(None);
+            trace_naming_pane(trace.as_deref_mut(), pane_id, "event_pane");
+            let process_info = match client.pane_process_info(pane_id) {
+                Ok(process_info) => process_info,
+                Err(error) => {
+                    trace_process_error(trace.as_deref_mut(), error.to_string());
+                    return Ok(None);
+                }
             };
+            trace_process_info(trace.as_deref_mut(), pane_id, &process_info);
+            if let Some(leader) = process_info.leader() {
+                trace_representative(trace.as_deref_mut(), leader);
+            }
             if process_info.foreground_process_group_id != Some(*shell_pid) {
+                trace_rejection(trace.as_deref_mut(), "shell_pid_mismatch");
                 return Ok(None);
             }
             Ok(Some(policy.label(shell, None).unwrap_or_default()))
         }
         _ => {
             let Some(pane_id) = naming_pane(snapshot, tab) else {
+                trace_rejection(
+                    trace.as_deref_mut(),
+                    if tab.pane_count > 1 {
+                        "background_multi_pane"
+                    } else {
+                        "no_naming_pane"
+                    },
+                );
                 return Ok(None);
             };
+            trace_naming_pane(trace.as_deref_mut(), pane_id, "snapshot_selection");
             let preferred_program = snapshot
                 .panes
                 .iter()
                 .find(|pane| pane.pane_id == pane_id)
                 .and_then(|pane| pane.agent.as_deref());
-            let process_info = client.pane_process_info(pane_id).ok();
-            let Some(process_info) = process_info else {
-                return Ok(None);
+            let process_info = match client.pane_process_info(pane_id) {
+                Ok(process_info) => process_info,
+                Err(error) => {
+                    trace_process_error(trace.as_deref_mut(), error.to_string());
+                    return Ok(None);
+                }
             };
+            trace_process_info(trace.as_deref_mut(), pane_id, &process_info);
             let Some(process) = representative_process(&process_info, policy, preferred_program)
             else {
+                trace_rejection(trace.as_deref_mut(), "no_representative_process");
                 return Ok(None);
             };
+            trace_representative(trace.as_deref_mut(), process);
             if ambient_shell_only && !policy.is_shell_program(process.program()) {
+                trace_rejection(trace.as_deref_mut(), "representative_not_shell");
                 return Ok(None);
             }
             if policy.is_ignored_program(process.program()) {
+                trace_rejection(trace, "ignored_process");
                 return Ok(None);
             }
             Ok(Some(
@@ -442,6 +590,100 @@ fn computed_name(
                     .unwrap_or_default(),
             ))
         }
+    }
+}
+
+fn trace_result(
+    trace: Option<&mut CandidateRecord>,
+    eligible: Option<bool>,
+    rejection_reason: Option<&str>,
+    outcome: &str,
+) {
+    if let Some(trace) = trace {
+        if let Some(eligible) = eligible {
+            trace.eligible = Some(eligible);
+        }
+        if let Some(reason) = rejection_reason {
+            trace.rejection_reason = Some(reason.into());
+        }
+        trace.outcome = Some(outcome.into());
+    }
+}
+
+fn trace_ownership_after(trace: Option<&mut CandidateRecord>, state: &State, tab_id: &str) {
+    if let Some(trace) = trace {
+        trace.ownership_after = state.ownership(tab_id).cloned();
+    }
+}
+
+fn trace_naming_pane(trace: Option<&mut CandidateRecord>, pane_id: &str, reason: &str) {
+    if let Some(trace) = trace {
+        trace.selected_naming_pane = Some(pane_id.into());
+        trace.naming_pane_reason = Some(reason.into());
+    }
+}
+
+fn trace_rejection(trace: Option<&mut CandidateRecord>, reason: &str) {
+    if let Some(trace) = trace {
+        trace.rejection_reason = Some(reason.into());
+        if trace.outcome.is_none() {
+            trace.outcome = Some(reason.into());
+        }
+    }
+}
+
+fn trace_process_info(
+    trace: Option<&mut CandidateRecord>,
+    pane_id: &str,
+    process_info: &PaneProcessInfo,
+) {
+    if let Some(trace) = trace {
+        trace.process_info = Some(crate::telemetry::ProcessRecord::from_info(
+            pane_id,
+            process_info,
+        ));
+        trace.process_error = None;
+    }
+}
+
+fn trace_process_error(trace: Option<&mut CandidateRecord>, error: String) {
+    if let Some(trace) = trace {
+        trace.process_error = Some(error);
+        trace.rejection_reason = Some("process_unavailable".into());
+        trace.outcome = Some("process_unavailable".into());
+    }
+}
+
+fn trace_representative(trace: Option<&mut CandidateRecord>, process: &crate::herdr::ProcessInfo) {
+    if let Some(trace) = trace {
+        trace.representative_process =
+            Some(crate::telemetry::ProcessIdentity::from_process(process));
+    }
+}
+
+fn trace_rename_error(trace: Option<&mut CandidateRecord>, error: String) {
+    if let Some(trace) = trace {
+        trace.rename_attempted = true;
+        trace.rename_result = Some(format!("error: {error}"));
+        trace.outcome = Some("rename_error".into());
+    }
+}
+
+fn trace_guard_error(trace: Option<&mut CandidateRecord>, error: String) {
+    if let Some(trace) = trace {
+        trace.rename_attempted = false;
+        trace.rename_result = Some(format!("error: {error}"));
+        trace.outcome = Some("guard_read_error".into());
+    }
+}
+
+fn rejection_reason(ownership: Option<&TabOwnership>) -> String {
+    match ownership {
+        Some(TabOwnership::Manual) => "manual_ownership".into(),
+        Some(TabOwnership::AutomaticDisabled) => "automatic_disabled".into(),
+        Some(TabOwnership::PendingRename { .. }) => "pending_rename".into(),
+        None => "non_placeholder_unowned".into(),
+        Some(TabOwnership::Owned { .. } | TabOwnership::ResetPending) => "ineligible".into(),
     }
 }
 

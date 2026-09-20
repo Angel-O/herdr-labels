@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
 use crate::herdr::{PaneInfo, ProcessInfo};
+use crate::telemetry::DecisionRecord;
 
 static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
@@ -31,6 +32,8 @@ struct FakeClient {
     current: HashMap<String, Tab>,
     processes: HashMap<String, PaneProcessInfo>,
     renamed: Vec<(String, String)>,
+    get_error: Option<String>,
+    rename_error: Option<String>,
 }
 
 impl FakeClient {
@@ -49,6 +52,8 @@ impl FakeClient {
             current,
             processes,
             renamed: Vec::new(),
+            get_error: None,
+            rename_error: None,
         }
     }
 }
@@ -59,10 +64,16 @@ impl TabClient for FakeClient {
     }
 
     fn get_tab(&mut self, tab_id: &str) -> Result<Option<Tab>> {
+        if let Some(error) = &self.get_error {
+            return Err(error.clone().into());
+        }
         Ok(self.current.get(tab_id).cloned())
     }
 
     fn rename_tab(&mut self, tab_id: &str, label: &str) -> Result<()> {
+        if let Some(error) = &self.rename_error {
+            return Err(error.clone().into());
+        }
         self.renamed.push((tab_id.to_owned(), label.to_owned()));
         if let Some(tab) = self.current.get_mut(tab_id) {
             tab.label = label.to_owned();
@@ -124,6 +135,10 @@ fn config(state_dir: &TestDir, invocation: Invocation) -> Config {
         state_dir: state_dir.0.clone(),
         settings: Settings::default(),
         invocation,
+        event: None,
+        event_workspace_id: None,
+        event_tab_id: None,
+        event_pane_id: None,
     }
 }
 
@@ -1116,6 +1131,207 @@ fn native_pane_close_refreshes_an_owned_split_without_focus_change() {
         State::load(&directory.0).unwrap().ownership("w1:t1"),
         Some(TabOwnership::Owned { last_base, .. }) if last_base == "zsh"
     ));
+}
+
+#[test]
+fn close_telemetry_uses_the_decision_snapshot_and_process_observation() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: "ai board".into(),
+            last_rendered: "[1] ai board".into(),
+        },
+    );
+    let mut surviving = tab("w1:t1", "w1", "[1] ai board", false);
+    surviving.pane_count = 1;
+    let mut session = snapshot(vec![surviving]);
+    session.panes[0].pane_id = "w1:t1:survivor".into();
+    let mut client = FakeClient::new(session, &[("w1:t1:survivor", "zsh")]);
+    let mut closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+    closed.event = Some("pane.closed".into());
+    closed.event_workspace_id = Some("w1".into());
+    closed.event_pane_id = Some("w1:t1:closed".into());
+    let mut record = DecisionRecord::from_config(&closed).unwrap();
+
+    run_pass_with_telemetry(&closed, &closed.invocation, &mut client, Some(&mut record)).unwrap();
+    record.finish(&Ok(()));
+
+    let candidate = &record.candidates[0];
+    assert_eq!(
+        record.snapshot.as_ref().unwrap().closed_pane_present,
+        Some(false)
+    );
+    assert_eq!(
+        candidate.selected_naming_pane.as_deref(),
+        Some("w1:t1:survivor")
+    );
+    assert_eq!(
+        candidate.process_info.as_ref().unwrap().pane_id,
+        "w1:t1:survivor"
+    );
+    assert_eq!(
+        candidate
+            .representative_process
+            .as_ref()
+            .unwrap()
+            .executable_basename,
+        "zsh"
+    );
+    assert_eq!(candidate.desired_label.as_deref(), Some("[1] zsh"));
+    assert_eq!(candidate.rename_result.as_deref(), Some("renamed"));
+    assert_eq!(record.terminal_outcome, "renamed");
+    serde_json::from_str::<serde_json::Value>(&serde_json::to_string(&record).unwrap()).unwrap();
+}
+
+#[test]
+fn guarded_tab_read_failure_keeps_the_real_candidate_trace_without_claiming_a_rename() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: "ai board".into(),
+            last_rendered: "[1] ai board".into(),
+        },
+    );
+    let mut session = snapshot(vec![tab("w1:t1", "w1", "[1] ai board", false)]);
+    session.panes[0].pane_id = "w1:t1:survivor".into();
+    let mut client = FakeClient::new(session, &[("w1:t1:survivor", "zsh")]);
+    client.get_error = Some("tab.get unavailable".into());
+    let closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+    let mut record = DecisionRecord::from_config(&closed).unwrap();
+
+    let error =
+        run_pass_with_telemetry(&closed, &closed.invocation, &mut client, Some(&mut record))
+            .unwrap_err();
+    record.finish(&Err(error));
+
+    let candidate = &record.candidates[0];
+    assert_eq!(
+        candidate.selected_naming_pane.as_deref(),
+        Some("w1:t1:survivor")
+    );
+    assert!(candidate.process_info.is_some());
+    assert_eq!(candidate.desired_label.as_deref(), Some("[1] zsh"));
+    assert!(candidate.guarded_tab.is_none());
+    assert!(matches!(
+        candidate.ownership_after,
+        Some(TabOwnership::PendingRename { .. })
+    ));
+    assert!(matches!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(TabOwnership::PendingRename { .. })
+    ));
+    assert!(!candidate.rename_attempted);
+    assert!(
+        candidate
+            .rename_result
+            .as_deref()
+            .is_some_and(|result| result.contains("tab.get unavailable"))
+    );
+    assert_eq!(candidate.outcome.as_deref(), Some("guard_read_error"));
+}
+
+#[test]
+fn missing_tab_keeps_the_persisted_pending_rename_in_telemetry() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: "ai board".into(),
+            last_rendered: "[1] ai board".into(),
+        },
+    );
+    let mut session = snapshot(vec![tab("w1:t1", "w1", "[1] ai board", false)]);
+    session.panes[0].pane_id = "w1:t1:survivor".into();
+    let mut client = FakeClient::new(session, &[("w1:t1:survivor", "zsh")]);
+    client.current.clear();
+    let closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+    let mut record = DecisionRecord::from_config(&closed).unwrap();
+
+    run_pass_with_telemetry(&closed, &closed.invocation, &mut client, Some(&mut record)).unwrap();
+    record.finish(&Ok(()));
+
+    let candidate = &record.candidates[0];
+    assert_eq!(candidate.rename_result.as_deref(), Some("tab_not_found"));
+    assert!(matches!(
+        candidate.ownership_after,
+        Some(TabOwnership::PendingRename { .. })
+    ));
+    assert!(matches!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(TabOwnership::PendingRename { .. })
+    ));
+    assert_eq!(candidate.outcome.as_deref(), Some("tab_missing"));
+}
+
+#[test]
+fn tab_rename_failure_keeps_the_guard_observation_and_records_the_attempt() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: "ai board".into(),
+            last_rendered: "[1] ai board".into(),
+        },
+    );
+    let mut session = snapshot(vec![tab("w1:t1", "w1", "[1] ai board", false)]);
+    session.panes[0].pane_id = "w1:t1:survivor".into();
+    let mut client = FakeClient::new(session, &[("w1:t1:survivor", "zsh")]);
+    client.rename_error = Some("tab.rename rejected".into());
+    let closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+    let mut record = DecisionRecord::from_config(&closed).unwrap();
+
+    let error =
+        run_pass_with_telemetry(&closed, &closed.invocation, &mut client, Some(&mut record))
+            .unwrap_err();
+    record.finish(&Err(error));
+
+    let candidate = &record.candidates[0];
+    assert_eq!(
+        candidate.guarded_tab.as_ref().unwrap().label,
+        "[1] ai board"
+    );
+    assert!(matches!(
+        candidate.ownership_after,
+        Some(TabOwnership::PendingRename { .. })
+    ));
+    assert!(matches!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(TabOwnership::PendingRename { .. })
+    ));
+    assert!(candidate.rename_attempted);
+    assert!(
+        candidate
+            .rename_result
+            .as_deref()
+            .is_some_and(|result| result.contains("tab.rename rejected"))
+    );
+    assert_eq!(candidate.outcome.as_deref(), Some("rename_error"));
 }
 
 #[test]

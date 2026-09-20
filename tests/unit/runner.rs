@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
-use crate::herdr::{PaneInfo, PaneProcessInfo, SessionSnapshot, SessionTab};
+use crate::herdr::{PaneProcessInfo, SessionSnapshot};
 use crate::numbering::Tab;
 use crate::settings::Settings;
 
@@ -36,6 +36,7 @@ struct FakeClient {
     snapshots: usize,
     rerun_on_first_snapshot: Option<PathBuf>,
     rerun_on_every_snapshot: Option<PathBuf>,
+    invalid_rerun_on_first_snapshot: Option<PathBuf>,
 }
 
 struct ProcessClient {
@@ -48,17 +49,6 @@ struct FailingProcessClient {
     observations: usize,
 }
 
-struct ClosedPaneReadinessClient {
-    snapshot: SessionSnapshot,
-    ready_snapshot: Option<SessionSnapshot>,
-    current: Tab,
-    delayed_pane: String,
-    ready_at: Instant,
-    snapshots: usize,
-    process_queries: usize,
-    renamed: Vec<(String, String)>,
-}
-
 impl FakeClient {
     fn with_tab(tab: Option<Tab>) -> Self {
         Self {
@@ -68,6 +58,7 @@ impl FakeClient {
             snapshots: 0,
             rerun_on_first_snapshot: None,
             rerun_on_every_snapshot: None,
+            invalid_rerun_on_first_snapshot: None,
         }
     }
 }
@@ -82,6 +73,13 @@ impl TabClient for FakeClient {
         }
         if let Some(state_dir) = &self.rerun_on_every_snapshot {
             ReconciliationLock::request_rerun(state_dir, &Invocation::Full)?;
+        }
+        if self.snapshots == 1
+            && let Some(state_dir) = &self.invalid_rerun_on_first_snapshot
+        {
+            let reruns = state_dir.join("reruns");
+            std::fs::create_dir_all(&reruns)?;
+            std::fs::write(reruns.join("invalid.json"), b"{")?;
         }
         Ok(SessionSnapshot {
             focused_pane_id: None,
@@ -148,60 +146,11 @@ impl TabClient for FailingProcessClient {
     }
 }
 
-impl TabClient for ClosedPaneReadinessClient {
-    fn snapshot(&mut self) -> Result<SessionSnapshot> {
-        self.snapshots += 1;
-        if Instant::now() >= self.ready_at
-            && let Some(snapshot) = &self.ready_snapshot
-        {
-            return Ok(snapshot.clone());
-        }
-        Ok(self.snapshot.clone())
-    }
-
-    fn get_tab(&mut self, _tab_id: &str) -> Result<Option<Tab>> {
-        Ok(Some(self.current.clone()))
-    }
-
-    fn rename_tab(&mut self, tab_id: &str, label: &str) -> Result<()> {
-        self.renamed.push((tab_id.into(), label.into()));
-        self.current.label = label.into();
-        Ok(())
-    }
-
-    fn pane_process_info(&mut self, pane_id: &str) -> Result<PaneProcessInfo> {
-        self.process_queries += 1;
-        if pane_id == self.delayed_pane && Instant::now() < self.ready_at {
-            return Ok(PaneProcessInfo {
-                foreground_process_group_id: Some(7),
-                foreground_processes: Vec::new(),
-            });
-        }
-        Ok(process_info("zsh"))
-    }
-}
-
 fn tab(label: &str) -> Tab {
     Tab {
         tab_id: "w1:t1".into(),
         workspace_id: "w1".into(),
         label: label.into(),
-    }
-}
-
-fn closed_pane_snapshot() -> SessionSnapshot {
-    SessionSnapshot {
-        focused_pane_id: None,
-        tabs: vec![SessionTab {
-            tab: tab("[1] ai board"),
-            focused: false,
-            pane_count: 1,
-        }],
-        panes: vec![PaneInfo {
-            pane_id: "w1:t1:survivor".into(),
-            tab_id: "w1:t1".into(),
-            agent: None,
-        }],
     }
 }
 
@@ -223,6 +172,10 @@ fn config(directory: &TestDir, invocation: Invocation) -> Config {
         state_dir: directory.0.clone(),
         settings: Settings::default(),
         invocation,
+        event: None,
+        event_workspace_id: None,
+        event_tab_id: None,
+        event_pane_id: None,
     }
 }
 
@@ -273,12 +226,14 @@ fn coalescing_consumes_a_rerun_requested_during_the_first_pass() {
     let mut client = FakeClient::with_tab(None);
     client.rerun_on_first_snapshot = Some(directory.0.clone());
     let mut remaining_passes = MAX_RECONCILIATION_PASSES;
+    let mut telemetry = None;
 
     run_coalesced_passes(
         &config,
         &Invocation::Workspace("w1".into()),
         &mut client,
         &mut remaining_passes,
+        &mut telemetry,
     )
     .unwrap();
 
@@ -294,12 +249,14 @@ fn continuous_reruns_stop_at_the_process_pass_budget() {
     let mut client = FakeClient::with_tab(None);
     client.rerun_on_every_snapshot = Some(directory.0.clone());
     let mut remaining_passes = MAX_RECONCILIATION_PASSES;
+    let mut telemetry = None;
 
     run_coalesced_passes(
         &config,
         &Invocation::Full,
         &mut client,
         &mut remaining_passes,
+        &mut telemetry,
     )
     .unwrap();
 
@@ -316,167 +273,13 @@ fn handoff_uses_only_the_remaining_process_pass_budget() {
     client.rerun_on_every_snapshot = Some(directory.0.clone());
     ReconciliationLock::request_rerun(&directory.0, &Invocation::Full).unwrap();
     let mut remaining_passes = 2;
+    let mut telemetry = None;
 
-    handoff_after_release(&config, &mut client, &mut remaining_passes).unwrap();
+    handoff_after_release(&config, &mut client, &mut remaining_passes, &mut telemetry).unwrap();
 
     assert_eq!(client.snapshots, 2);
     assert_eq!(remaining_passes, 0);
     assert!(ReconciliationLock::rerun_requested(&directory.0).unwrap());
-}
-
-#[test]
-fn closed_pane_settling_waits_for_elapsed_survivor_readiness() {
-    let directory = TestDir::new();
-    let mut state = State::load(&directory.0).unwrap();
-    state.set_ownership(
-        "w1:t1",
-        TabOwnership::Owned {
-            last_base: "ai board".into(),
-            last_rendered: "[1] ai board".into(),
-        },
-    );
-    state.persist().unwrap();
-    let invocation = Invocation::ClosedPane {
-        workspace_id: "w1".into(),
-        pane_id: "w1:t1:closed".into(),
-    };
-    let config = config(&directory, invocation);
-    let ready_at = Instant::now() + Duration::from_millis(50);
-    let mut client = ClosedPaneReadinessClient {
-        snapshot: closed_pane_snapshot(),
-        ready_snapshot: None,
-        current: tab("[1] ai board"),
-        delayed_pane: "w1:t1:survivor".into(),
-        ready_at,
-        snapshots: 0,
-        process_queries: 0,
-        renamed: Vec::new(),
-    };
-    let mut remaining_passes = 1;
-
-    run_coalesced_passes(
-        &config,
-        &config.invocation,
-        &mut client,
-        &mut remaining_passes,
-    )
-    .unwrap();
-
-    assert!(Instant::now() >= ready_at);
-    assert!(client.snapshots >= 3);
-    assert!(client.process_queries >= 2);
-    assert_eq!(client.renamed, [("w1:t1".into(), "[1] zsh".into())]);
-}
-
-#[test]
-fn closed_pane_settling_waits_for_delayed_survivor_selectability() {
-    let directory = TestDir::new();
-    let mut state = State::load(&directory.0).unwrap();
-    state.set_ownership(
-        "w1:t1",
-        TabOwnership::Owned {
-            last_base: "ai board".into(),
-            last_rendered: "[1] ai board".into(),
-        },
-    );
-    state.persist().unwrap();
-    let invocation = Invocation::ClosedPane {
-        workspace_id: "w1".into(),
-        pane_id: "w1:t1:closed".into(),
-    };
-    let config = config(&directory, invocation);
-    let ready_at = Instant::now() + Duration::from_millis(50);
-    let initial_snapshot = SessionSnapshot {
-        focused_pane_id: None,
-        tabs: vec![
-            SessionTab {
-                tab: tab("[1] ai board"),
-                focused: false,
-                pane_count: 2,
-            },
-            SessionTab {
-                tab: Tab {
-                    tab_id: "w1:t2".into(),
-                    workspace_id: "w1".into(),
-                    label: "[2] zsh".into(),
-                },
-                focused: false,
-                pane_count: 1,
-            },
-        ],
-        panes: vec![
-            PaneInfo {
-                pane_id: "w1:t1:survivor".into(),
-                tab_id: "w1:t1".into(),
-                agent: None,
-            },
-            PaneInfo {
-                pane_id: "w1:t1:closing".into(),
-                tab_id: "w1:t1".into(),
-                agent: None,
-            },
-            PaneInfo {
-                pane_id: "w1:t2:ready".into(),
-                tab_id: "w1:t2".into(),
-                agent: None,
-            },
-        ],
-    };
-    let ready_snapshot = SessionSnapshot {
-        focused_pane_id: None,
-        tabs: vec![
-            SessionTab {
-                tab: tab("[1] ai board"),
-                focused: false,
-                pane_count: 1,
-            },
-            SessionTab {
-                tab: Tab {
-                    tab_id: "w1:t2".into(),
-                    workspace_id: "w1".into(),
-                    label: "[2] zsh".into(),
-                },
-                focused: false,
-                pane_count: 1,
-            },
-        ],
-        panes: vec![
-            PaneInfo {
-                pane_id: "w1:t1:survivor".into(),
-                tab_id: "w1:t1".into(),
-                agent: None,
-            },
-            PaneInfo {
-                pane_id: "w1:t2:ready".into(),
-                tab_id: "w1:t2".into(),
-                agent: None,
-            },
-        ],
-    };
-    let mut client = ClosedPaneReadinessClient {
-        snapshot: initial_snapshot,
-        ready_snapshot: Some(ready_snapshot),
-        current: tab("[1] ai board"),
-        delayed_pane: "w1:t1:survivor".into(),
-        ready_at,
-        snapshots: 0,
-        process_queries: 0,
-        renamed: Vec::new(),
-    };
-    let mut remaining_passes = 1;
-
-    run_coalesced_passes(
-        &config,
-        &config.invocation,
-        &mut client,
-        &mut remaining_passes,
-    )
-    .unwrap();
-
-    assert!(Instant::now() >= ready_at);
-    assert!(client.snapshots >= 3);
-    assert!(client.process_queries >= 2);
-    assert_eq!(client.renamed, [("w1:t1".into(), "[1] zsh".into())]);
 }
 
 #[test]
@@ -496,12 +299,39 @@ fn successful_handoff_executes_all_pending_requesters() {
     ReconciliationLock::request_rerun(&directory.0, &Invocation::Full).unwrap();
     ReconciliationLock::request_rerun(&directory.0, &second).unwrap();
     let mut remaining_passes = 4;
+    let mut telemetry = None;
 
-    handoff_after_release(&config, &mut client, &mut remaining_passes).unwrap();
+    handoff_after_release(&config, &mut client, &mut remaining_passes, &mut telemetry).unwrap();
 
-    assert_eq!(client.snapshots, 5);
+    assert_eq!(client.snapshots, 3);
     assert_eq!(remaining_passes, 1);
     assert!(!ReconciliationLock::rerun_requested(&directory.0).unwrap());
+}
+
+#[test]
+fn malformed_consumed_rerun_finishes_its_close_record_before_returning_error() {
+    let directory = TestDir::new();
+    let config = config(&directory, Invocation::Full);
+    let invocation = Invocation::ClosedPane {
+        workspace_id: "w1".into(),
+        pane_id: "w1:p1".into(),
+    };
+    let mut client = FakeClient::with_tab(None);
+    client.invalid_rerun_on_first_snapshot = Some(directory.0.clone());
+    let mut remaining_passes = 2;
+    let mut telemetry = DecisionRecord::from_invocation(&config, &invocation);
+
+    let error = run_coalesced_passes(
+        &config,
+        &invocation,
+        &mut client,
+        &mut remaining_passes,
+        &mut telemetry,
+    )
+    .unwrap_err();
+
+    assert!(!error.to_string().is_empty());
+    assert!(telemetry.is_none());
 }
 
 #[test]

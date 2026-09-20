@@ -10,6 +10,7 @@ mod reconciliation;
 mod runner;
 mod settings;
 mod state;
+mod telemetry;
 
 fn main() {
     if let Err(error) = run() {

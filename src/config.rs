@@ -23,6 +23,11 @@ pub(crate) struct Config {
     pub(crate) state_dir: PathBuf,
     pub(crate) settings: Settings,
     pub(crate) invocation: Invocation,
+    /// Original event context retained for telemetry without changing dispatch.
+    pub(crate) event: Option<String>,
+    pub(crate) event_workspace_id: Option<String>,
+    pub(crate) event_tab_id: Option<String>,
+    pub(crate) event_pane_id: Option<String>,
 }
 
 /// Operation selected by plugin context or a shell-hook command.
@@ -79,12 +84,16 @@ impl Config {
         let socket_path = required_path(SOCKET_PATH_ENV)?;
         let state_dir = session_state_dir(&socket_path)?;
         let args: Vec<String> = env::args().skip(1).collect();
+        let event = env::var(PLUGIN_EVENT_ENV).ok();
+        let event_workspace_id = env::var(WORKSPACE_ID_ENV).ok();
+        let event_tab_id = env::var(TAB_ID_ENV).ok();
+        let event_pane_id = env::var(PANE_ID_ENV).ok();
         let invocation = invocation_from(
             &args,
-            env::var(PLUGIN_EVENT_ENV).ok().as_deref(),
-            env::var(WORKSPACE_ID_ENV).ok(),
-            env::var(TAB_ID_ENV).ok(),
-            env::var(PANE_ID_ENV).ok(),
+            event.as_deref(),
+            event_workspace_id.clone(),
+            event_tab_id.clone(),
+            event_pane_id.clone(),
         )?;
         let settings = if matches!(invocation, Invocation::Clear) {
             Settings::default()
@@ -97,6 +106,10 @@ impl Config {
             state_dir,
             settings,
             invocation,
+            event,
+            event_workspace_id,
+            event_tab_id,
+            event_pane_id,
         })
     }
 }
