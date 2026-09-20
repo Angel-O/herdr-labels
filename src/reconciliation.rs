@@ -53,6 +53,9 @@ pub(crate) fn run_pass_with_telemetry(
     client: &mut impl TabClient,
     mut telemetry: Option<&mut DecisionRecord>,
 ) -> Result<()> {
+    if !config.settings.diagnostic_telemetry {
+        telemetry = None;
+    }
     let mut state = State::load(&config.state_dir)?;
     match invocation {
         Invocation::Clear => return clear_session(client, &mut state),
@@ -537,7 +540,12 @@ fn computed_name_with_trace(
                 trace_rejection(trace.as_deref_mut(), "event_program_not_foreground");
                 return Ok(None);
             }
-            let selection = representative_process_with_trace(&process_info, policy, None);
+            let selection = representative_process_with_trace_mode(
+                &process_info,
+                policy,
+                None,
+                trace.is_some(),
+            );
             if let Some(selection) = selection.as_ref() {
                 trace_selection(trace.as_deref_mut(), selection);
             } else if !policy.is_ignored_program(program) {
@@ -611,9 +619,12 @@ fn computed_name_with_trace(
                 }
             };
             trace_process_info(trace.as_deref_mut(), pane_id, &process_info);
-            let Some(selection) =
-                representative_process_with_trace(&process_info, policy, preferred_program)
-            else {
+            let Some(selection) = representative_process_with_trace_mode(
+                &process_info,
+                policy,
+                preferred_program,
+                trace.is_some(),
+            ) else {
                 trace_rejection(trace.as_deref_mut(), "no_representative_process");
                 return Ok(None);
             };
@@ -789,12 +800,25 @@ fn representative_process_with_trace<'a>(
     policy: &NamingPolicy,
     preferred_program: Option<&str>,
 ) -> Option<RepresentativeSelection<'a>> {
+    representative_process_with_trace_mode(process_info, policy, preferred_program, true)
+}
+
+fn representative_process_with_trace_mode<'a>(
+    process_info: &'a PaneProcessInfo,
+    policy: &NamingPolicy,
+    preferred_program: Option<&str>,
+    collect_ignored_processes: bool,
+) -> Option<RepresentativeSelection<'a>> {
     let leader = process_info.leader()?;
-    let ignored_processes = process_info
-        .foreground_processes
-        .iter()
-        .filter(|process| policy.is_ignored_program(process.program()))
-        .collect();
+    let ignored_processes = if collect_ignored_processes {
+        process_info
+            .foreground_processes
+            .iter()
+            .filter(|process| policy.is_ignored_program(process.program()))
+            .collect()
+    } else {
+        Vec::new()
+    };
     if let Some(process) = preferred_program.and_then(|preferred| {
         process_info.foreground_processes.iter().find(|process| {
             policy.same_program(preferred, process.program())

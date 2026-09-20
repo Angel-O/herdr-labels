@@ -155,6 +155,9 @@ pub(crate) struct TabObservation {
 
 impl DecisionRecord {
     pub(crate) fn from_config(config: &Config) -> Option<Self> {
+        if !config.settings.diagnostic_telemetry {
+            return None;
+        }
         let (trigger, path, target_kind) = match config.event.as_deref() {
             Some("pane.closed") => ("pane.closed", "pane_closed", "workspace"),
             Some("pane.focused" | "tab.focused")
@@ -194,6 +197,9 @@ impl DecisionRecord {
 
     /// Builds a record from the invocation actually consumed by a deferred pass.
     pub(crate) fn from_invocation(config: &Config, invocation: &Invocation) -> Option<Self> {
+        if !config.settings.diagnostic_telemetry {
+            return None;
+        }
         let (trigger, path, target_kind) = match invocation {
             Invocation::ClosedPane { .. } => ("pane.closed", "pane_closed", "workspace"),
             Invocation::Tab { .. }

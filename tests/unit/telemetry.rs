@@ -7,10 +7,14 @@ use crate::numbering::Tab;
 use crate::settings::Settings;
 
 fn config(invocation: Invocation, event: Option<&str>) -> Config {
+    let settings = Settings {
+        diagnostic_telemetry: true,
+        ..Settings::default()
+    };
     Config {
         socket_path: PathBuf::from("unused.sock"),
         state_dir: PathBuf::from("unused-state"),
-        settings: Settings::default(),
+        settings,
         invocation,
         event: event.map(str::to_owned),
         event_workspace_id: Some("w1".into()),

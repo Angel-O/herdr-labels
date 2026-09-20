@@ -8,6 +8,9 @@ number_tabs = true
 # enabled, an idle third tab is displayed as `[3]`.
 hide_idle_shell = false
 
+# Emit detailed naming decisions to the plugin command log.
+diagnostic_telemetry = false
+
 # Maximum Unicode characters in an automatically generated base name.
 max_label_chars = 24
 

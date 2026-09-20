@@ -167,16 +167,54 @@ fn process_info(program: &str) -> PaneProcessInfo {
 }
 
 fn config(directory: &TestDir, invocation: Invocation) -> Config {
+    let settings = Settings {
+        diagnostic_telemetry: true,
+        ..Settings::default()
+    };
     Config {
         socket_path: PathBuf::from("unused.sock"),
         state_dir: directory.0.clone(),
-        settings: Settings::default(),
+        settings,
         invocation,
         event: None,
         event_workspace_id: None,
         event_tab_id: None,
         event_pane_id: None,
     }
+}
+
+#[test]
+fn disabled_diagnostic_telemetry_builds_no_record() {
+    let directory = TestDir::new();
+    let mut config = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:p1".into(),
+        },
+    );
+    config.settings = Settings {
+        diagnostic_telemetry: false,
+        ..config.settings
+    };
+
+    assert!(DecisionRecord::from_config(&config).is_none());
+    assert!(DecisionRecord::from_invocation(&config, &config.invocation).is_none());
+}
+
+#[test]
+fn enabled_diagnostic_telemetry_builds_the_existing_record() {
+    let directory = TestDir::new();
+    let config = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:p1".into(),
+        },
+    );
+
+    assert!(DecisionRecord::from_config(&config).is_some());
+    assert!(DecisionRecord::from_invocation(&config, &config.invocation).is_some());
 }
 
 #[test]

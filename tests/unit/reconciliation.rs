@@ -133,10 +133,14 @@ fn snapshot(tabs: Vec<SessionTab>) -> SessionSnapshot {
 }
 
 fn config(state_dir: &TestDir, invocation: Invocation) -> Config {
+    let settings = Settings {
+        diagnostic_telemetry: true,
+        ..Settings::default()
+    };
     Config {
         socket_path: PathBuf::from("unused.sock"),
         state_dir: state_dir.0.clone(),
-        settings: Settings::default(),
+        settings,
         invocation,
         event: None,
         event_workspace_id: None,
@@ -285,6 +289,8 @@ fn ignored_child_is_skipped_and_shell_leader_is_selected() {
             .collect::<Vec<_>>(),
         ["starship"]
     );
+    let naming_only = representative_process_with_trace_mode(&info, &policy, None, false).unwrap();
+    assert!(naming_only.ignored_processes.is_empty());
 }
 
 #[test]

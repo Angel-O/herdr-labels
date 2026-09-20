@@ -11,13 +11,15 @@ use serde::Deserialize;
 
 use crate::filesystem::absolute_path;
 
-/// User-configurable tab naming and numbering behavior.
+/// User-configurable tab naming, numbering, and diagnostic behavior.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Settings {
     pub(crate) auto_name_tabs: bool,
     pub(crate) number_tabs: bool,
     pub(crate) hide_idle_shell: bool,
+    /// Emit detailed decision records to the plugin command log.
+    pub(crate) diagnostic_telemetry: bool,
     pub(crate) max_label_chars: usize,
     pub(crate) shells: Vec<String>,
     pub(crate) ignored_processes: Vec<String>,
@@ -45,6 +47,7 @@ impl Default for Settings {
             auto_name_tabs: true,
             number_tabs: true,
             hide_idle_shell: false,
+            diagnostic_telemetry: false,
             max_label_chars: 24,
             shells: ["zsh", "bash", "sh", "dash", "ksh"]
                 .into_iter()
