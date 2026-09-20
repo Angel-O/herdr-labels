@@ -36,6 +36,7 @@ pub(crate) struct DecisionRecord {
     pub(crate) available_tab_ids: Vec<String>,
     pub(crate) target_scope: TargetScope,
     pub(crate) snapshot: Option<SnapshotRecord>,
+    pub(crate) pane_mapping: Option<PaneMappingRecord>,
     pub(crate) candidates: Vec<CandidateRecord>,
     pub(crate) lock: LockRecord,
     pub(crate) rerun: RerunRecord,
@@ -80,6 +81,15 @@ pub(crate) struct SnapshotRecord {
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct PaneMappingRecord {
+    pub(crate) pane_id: String,
+    pub(crate) mapped_tab_id: Option<String>,
+    pub(crate) resolution: String,
+    pub(crate) validation: String,
+    pub(crate) consumed: bool,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct TabSnapshotRecord {
     pub(crate) tab_id: String,
     pub(crate) workspace_id: String,
@@ -111,6 +121,8 @@ pub(crate) struct CandidateRecord {
     pub(crate) process_info: Option<ProcessRecord>,
     pub(crate) process_error: Option<String>,
     pub(crate) representative_process: Option<ProcessIdentity>,
+    pub(crate) representative_selection: Option<String>,
+    pub(crate) ignored_processes_skipped: Vec<ProcessIdentity>,
     pub(crate) computed_base_label: Option<String>,
     pub(crate) desired_label: Option<String>,
     pub(crate) guarded_tab: Option<TabObservation>,
@@ -237,6 +249,7 @@ impl DecisionRecord {
             available_tab_ids: Vec::new(),
             target_scope,
             snapshot: None,
+            pane_mapping: None,
             candidates: Vec::new(),
             lock: LockRecord::default(),
             rerun: RerunRecord {
@@ -321,6 +334,23 @@ impl DecisionRecord {
 
     pub(crate) fn push_candidate(&mut self, candidate: CandidateRecord) {
         self.candidates.push(candidate);
+    }
+
+    pub(crate) fn record_pane_mapping(
+        &mut self,
+        pane_id: &str,
+        mapped_tab_id: Option<&str>,
+        resolution: &str,
+        validation: &str,
+        consumed: bool,
+    ) {
+        self.pane_mapping = Some(PaneMappingRecord {
+            pane_id: pane_id.into(),
+            mapped_tab_id: mapped_tab_id.map(str::to_owned),
+            resolution: resolution.into(),
+            validation: validation.into(),
+            consumed,
+        });
     }
 
     pub(crate) fn record_lock_attempt(&mut self, phase: &str, result: &str, wait_ns: u64) {

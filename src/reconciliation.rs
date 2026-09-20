@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 
 use crate::config::{Config, Invocation};
-use crate::herdr::{HerdrClient, PaneProcessInfo, SessionSnapshot, SessionTab};
+use crate::herdr::{HerdrClient, PaneProcessInfo, ProcessInfo, SessionSnapshot, SessionTab};
 use crate::naming::{NamingPolicy, ObservedProcess};
 use crate::numbering::{Tab, is_placeholder, numbered_label, strip_numeric_prefix};
 use crate::settings::Settings;
@@ -77,6 +77,47 @@ pub(crate) fn run_pass_with_telemetry(
     }
 
     let snapshot = client.snapshot()?;
+    let closed_resolution = match invocation {
+        Invocation::ClosedPane {
+            workspace_id,
+            pane_id,
+        } => Some(resolve_closed_pane(
+            &state,
+            &snapshot,
+            workspace_id,
+            pane_id,
+        )),
+        _ => None,
+    };
+    state.refresh_pane_tabs(
+        snapshot
+            .panes
+            .iter()
+            .map(|pane| (&pane.pane_id, &pane.tab_id)),
+        snapshot.tabs.iter().map(|tab| &tab.tab.tab_id),
+    );
+    if let (Invocation::ClosedPane { pane_id, .. }, Some(resolution)) =
+        (invocation, closed_resolution.as_ref())
+    {
+        if let Some(record) = telemetry.as_deref_mut() {
+            record.record_pane_mapping(
+                pane_id,
+                resolution.mapped_tab_id.as_deref(),
+                resolution.resolution,
+                resolution.validation,
+                resolution.valid,
+            );
+        }
+        if !resolution.valid {
+            if let Some(record) = telemetry.as_deref_mut() {
+                record.record_snapshot(&snapshot, &[]);
+                record.set_terminal_outcome(resolution.outcome);
+            }
+            state.persist()?;
+            return Ok(());
+        }
+        state.remove_pane_tab(pane_id);
+    }
     recover_pending(&snapshot, &mut state);
     if let Invocation::Toggle {
         tab_id: Some(tab_id),
@@ -88,7 +129,11 @@ pub(crate) fn run_pass_with_telemetry(
     }
     let policy = naming_policy(&config.settings);
     let fallback_shell = fallback_shell();
-    let targets = scoped_tabs(&snapshot, invocation);
+    let targets = if let Some(resolution) = closed_resolution.as_ref() {
+        scoped_closed_pane_tabs(&snapshot, invocation, resolution.mapped_tab_id.as_deref())
+    } else {
+        scoped_tabs(&snapshot, invocation)
+    };
     let positions = tab_positions(&snapshot);
 
     if let Some(record) = telemetry.as_deref_mut() {
@@ -488,13 +533,15 @@ fn computed_name_with_trace(
                 }
             };
             trace_process_info(trace.as_deref_mut(), pane_id, &process_info);
-            let Some(representative) = representative_process(&process_info, policy, None) else {
-                trace_rejection(trace.as_deref_mut(), "no_representative_process");
-                return Ok(None);
-            };
-            trace_representative(trace.as_deref_mut(), representative);
             if !process_group_matches_program(&process_info, program, policy) {
                 trace_rejection(trace.as_deref_mut(), "event_program_not_foreground");
+                return Ok(None);
+            }
+            let selection = representative_process_with_trace(&process_info, policy, None);
+            if let Some(selection) = selection.as_ref() {
+                trace_selection(trace.as_deref_mut(), selection);
+            } else if !policy.is_ignored_program(program) {
+                trace_rejection(trace.as_deref_mut(), "no_representative_process");
                 return Ok(None);
             }
             Ok(Some(
@@ -564,12 +611,14 @@ fn computed_name_with_trace(
                 }
             };
             trace_process_info(trace.as_deref_mut(), pane_id, &process_info);
-            let Some(process) = representative_process(&process_info, policy, preferred_program)
+            let Some(selection) =
+                representative_process_with_trace(&process_info, policy, preferred_program)
             else {
                 trace_rejection(trace.as_deref_mut(), "no_representative_process");
                 return Ok(None);
             };
-            trace_representative(trace.as_deref_mut(), process);
+            trace_selection(trace.as_deref_mut(), &selection);
+            let process = selection.process;
             if ambient_shell_only && !policy.is_shell_program(process.program()) {
                 trace_rejection(trace.as_deref_mut(), "representative_not_shell");
                 return Ok(None);
@@ -661,6 +710,18 @@ fn trace_representative(trace: Option<&mut CandidateRecord>, process: &crate::he
     }
 }
 
+fn trace_selection(trace: Option<&mut CandidateRecord>, selection: &RepresentativeSelection<'_>) {
+    if let Some(trace) = trace {
+        trace_representative(Some(trace), selection.process);
+        trace.representative_selection = Some(selection.reason.into());
+        trace.ignored_processes_skipped = selection
+            .ignored_processes
+            .iter()
+            .map(|process| crate::telemetry::ProcessIdentity::from_process(process))
+            .collect();
+    }
+}
+
 fn trace_rename_error(trace: Option<&mut CandidateRecord>, error: String) {
     if let Some(trace) = trace {
         trace.rename_attempted = true;
@@ -707,19 +768,44 @@ fn process_group_matches_program(
         })
 }
 
+struct RepresentativeSelection<'a> {
+    process: &'a ProcessInfo,
+    reason: &'static str,
+    ignored_processes: Vec<&'a ProcessInfo>,
+}
+
+#[allow(dead_code)]
 fn representative_process<'a>(
     process_info: &'a PaneProcessInfo,
     policy: &NamingPolicy,
     preferred_program: Option<&str>,
 ) -> Option<&'a crate::herdr::ProcessInfo> {
+    representative_process_with_trace(process_info, policy, preferred_program)
+        .map(|selection| selection.process)
+}
+
+fn representative_process_with_trace<'a>(
+    process_info: &'a PaneProcessInfo,
+    policy: &NamingPolicy,
+    preferred_program: Option<&str>,
+) -> Option<RepresentativeSelection<'a>> {
     let leader = process_info.leader()?;
+    let ignored_processes = process_info
+        .foreground_processes
+        .iter()
+        .filter(|process| policy.is_ignored_program(process.program()))
+        .collect();
     if let Some(process) = preferred_program.and_then(|preferred| {
-        process_info
-            .foreground_processes
-            .iter()
-            .find(|process| policy.same_program(preferred, process.program()))
+        process_info.foreground_processes.iter().find(|process| {
+            policy.same_program(preferred, process.program())
+                && !policy.is_ignored_program(process.program())
+        })
     }) {
-        return Some(process);
+        return Some(RepresentativeSelection {
+            process,
+            reason: "preferred",
+            ignored_processes,
+        });
     }
     let launched_process = leader.argv.as_deref().and_then(|arguments| {
         process_info
@@ -731,19 +817,42 @@ fn representative_process<'a>(
                     .iter()
                     .skip(1)
                     .any(|argument| policy.same_program(argument, process.program()))
+                    && !policy.is_ignored_program(process.program())
             })
     });
     if let Some(process) = launched_process {
-        return Some(process);
+        return Some(RepresentativeSelection {
+            process,
+            reason: "launched",
+            ignored_processes,
+        });
     }
-    if !policy.is_shell_program(leader.program()) {
-        return Some(leader);
+    if !policy.is_shell_program(leader.program()) && !policy.is_ignored_program(leader.program()) {
+        return Some(RepresentativeSelection {
+            process: leader,
+            reason: "leader",
+            ignored_processes,
+        });
     }
-    process_info
-        .foreground_processes
-        .iter()
-        .find(|process| !policy.is_shell_program(process.program()))
-        .or(Some(leader))
+    if let Some(process) = process_info.foreground_processes.iter().find(|process| {
+        process.pid != leader.pid
+            && !policy.is_shell_program(process.program())
+            && !policy.is_ignored_program(process.program())
+    }) {
+        return Some(RepresentativeSelection {
+            process,
+            reason: "foreground",
+            ignored_processes,
+        });
+    }
+    if policy.is_shell_program(leader.program()) {
+        return Some(RepresentativeSelection {
+            process: leader,
+            reason: "shell_leader_fallback",
+            ignored_processes,
+        });
+    }
+    None
 }
 
 fn naming_pane<'a>(snapshot: &'a SessionSnapshot, tab: &SessionTab) -> Option<&'a str> {
@@ -765,6 +874,9 @@ fn naming_pane<'a>(snapshot: &'a SessionSnapshot, tab: &SessionTab) -> Option<&'
 }
 
 fn scoped_tabs<'a>(snapshot: &'a SessionSnapshot, invocation: &Invocation) -> Vec<&'a SessionTab> {
+    if matches!(invocation, Invocation::ClosedPane { .. }) {
+        return Vec::new();
+    }
     if let Invocation::Init { pane_id, .. }
     | Invocation::Preexec { pane_id, .. }
     | Invocation::Precmd { pane_id, .. } = invocation
@@ -774,7 +886,6 @@ fn scoped_tabs<'a>(snapshot: &'a SessionSnapshot, invocation: &Invocation) -> Ve
     }
     let (workspace, tab) = match invocation {
         Invocation::Workspace(workspace_id)
-        | Invocation::ClosedPane { workspace_id, .. }
         | Invocation::ClosedTab {
             workspace_id: Some(workspace_id),
             ..
@@ -815,6 +926,89 @@ fn scoped_tabs<'a>(snapshot: &'a SessionSnapshot, invocation: &Invocation) -> Ve
                 && tab.is_none_or(|id| candidate.tab.tab_id == id)
         })
         .collect()
+}
+
+fn scoped_closed_pane_tabs<'a>(
+    snapshot: &'a SessionSnapshot,
+    invocation: &Invocation,
+    tab_id: Option<&str>,
+) -> Vec<&'a SessionTab> {
+    let Invocation::ClosedPane { workspace_id, .. } = invocation else {
+        return Vec::new();
+    };
+    let Some(tab_id) = tab_id else {
+        return Vec::new();
+    };
+    snapshot
+        .tabs
+        .iter()
+        .filter(|candidate| {
+            candidate.tab.workspace_id == *workspace_id && candidate.tab.tab_id == tab_id
+        })
+        .collect()
+}
+
+struct ClosedPaneResolution {
+    mapped_tab_id: Option<String>,
+    resolution: &'static str,
+    validation: &'static str,
+    valid: bool,
+    outcome: &'static str,
+}
+
+fn resolve_closed_pane(
+    state: &State,
+    snapshot: &SessionSnapshot,
+    workspace_id: &str,
+    pane_id: &str,
+) -> ClosedPaneResolution {
+    let Some(mapped_tab_id) = state.pane_tab(pane_id).map(str::to_owned) else {
+        return ClosedPaneResolution {
+            mapped_tab_id: None,
+            resolution: "missing",
+            validation: "not_run",
+            valid: false,
+            outcome: "pane_mapping_missing",
+        };
+    };
+    let Some(tab) = snapshot
+        .tabs
+        .iter()
+        .find(|tab| tab.tab.tab_id == mapped_tab_id)
+    else {
+        return ClosedPaneResolution {
+            mapped_tab_id: Some(mapped_tab_id),
+            resolution: "resolved",
+            validation: "tab_absent",
+            valid: false,
+            outcome: "pane_mapping_invalid",
+        };
+    };
+    if tab.tab.workspace_id != workspace_id {
+        return ClosedPaneResolution {
+            mapped_tab_id: Some(mapped_tab_id),
+            resolution: "resolved",
+            validation: "workspace_mismatch",
+            valid: false,
+            outcome: "pane_mapping_invalid",
+        };
+    }
+    if snapshot.panes.iter().any(|pane| pane.pane_id == pane_id) {
+        return ClosedPaneResolution {
+            mapped_tab_id: Some(mapped_tab_id),
+            resolution: "resolved",
+            validation: "pane_still_present",
+            valid: false,
+            outcome: "pane_mapping_invalid",
+        };
+    }
+    ClosedPaneResolution {
+        mapped_tab_id: Some(mapped_tab_id),
+        resolution: "resolved",
+        validation: "valid",
+        valid: true,
+        outcome: "pane_mapping_consumed",
+    }
 }
 
 fn pane_targets_tab(snapshot: &SessionSnapshot, pane_id: &str, tab_id: &str) -> bool {

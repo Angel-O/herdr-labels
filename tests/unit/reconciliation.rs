@@ -31,6 +31,7 @@ struct FakeClient {
     snapshot: SessionSnapshot,
     current: HashMap<String, Tab>,
     processes: HashMap<String, PaneProcessInfo>,
+    process_queries: Vec<String>,
     renamed: Vec<(String, String)>,
     get_error: Option<String>,
     rename_error: Option<String>,
@@ -51,6 +52,7 @@ impl FakeClient {
             snapshot,
             current,
             processes,
+            process_queries: Vec::new(),
             renamed: Vec::new(),
             get_error: None,
             rename_error: None,
@@ -82,6 +84,7 @@ impl TabClient for FakeClient {
     }
 
     fn pane_process_info(&mut self, pane_id: &str) -> Result<PaneProcessInfo> {
+        self.process_queries.push(pane_id.to_owned());
         self.processes
             .get(pane_id)
             .cloned()
@@ -145,6 +148,12 @@ fn config(state_dir: &TestDir, invocation: Invocation) -> Config {
 fn set_ownership(directory: &TestDir, ownership: TabOwnership) {
     let mut state = State::load(&directory.0).unwrap();
     state.set_ownership("w1:t1", ownership);
+    state.persist().unwrap();
+}
+
+fn set_pane_mapping(directory: &TestDir, pane_id: &str, tab_id: &str) {
+    let mut state = State::load(&directory.0).unwrap();
+    state.set_pane_tab(pane_id, tab_id);
     state.persist().unwrap();
 }
 
@@ -239,6 +248,122 @@ fn a_non_shell_child_wins_over_a_shell_script_group_leader() {
             .unwrap()
             .program(),
         "opencode"
+    );
+}
+
+#[test]
+fn ignored_child_is_skipped_and_shell_leader_is_selected() {
+    let mut settings = Settings::default();
+    settings.ignored_processes.push("starship".into());
+    let policy = naming_policy(&settings);
+    let info = PaneProcessInfo {
+        foreground_process_group_id: Some(7),
+        foreground_processes: vec![
+            ProcessInfo {
+                pid: 8,
+                name: "starship".into(),
+                argv0: Some("starship".into()),
+                argv: None,
+            },
+            ProcessInfo {
+                pid: 7,
+                name: "zsh".into(),
+                argv0: Some("zsh".into()),
+                argv: None,
+            },
+        ],
+    };
+
+    let selection = representative_process_with_trace(&info, &policy, None).unwrap();
+    assert_eq!(selection.process.program(), "zsh");
+    assert_eq!(selection.reason, "shell_leader_fallback");
+    assert_eq!(
+        selection
+            .ignored_processes
+            .iter()
+            .map(|process| process.program())
+            .collect::<Vec<_>>(),
+        ["starship"]
+    );
+}
+
+#[test]
+fn ignored_non_shell_leader_is_skipped_for_a_later_usable_child() {
+    let policy = naming_policy(&Settings::default());
+    let info = PaneProcessInfo {
+        foreground_process_group_id: Some(7),
+        foreground_processes: vec![
+            ProcessInfo {
+                pid: 7,
+                name: "git".into(),
+                argv0: Some("git".into()),
+                argv: Some(vec!["git".into(), "status".into()]),
+            },
+            ProcessInfo {
+                pid: 8,
+                name: "nvim".into(),
+                argv0: Some("nvim".into()),
+                argv: None,
+            },
+        ],
+    };
+
+    let selection = representative_process_with_trace(&info, &policy, None).unwrap();
+    assert_eq!(selection.process.program(), "nvim");
+    assert_eq!(selection.reason, "foreground");
+}
+
+#[test]
+fn ignored_selection_is_recorded_in_candidate_telemetry() {
+    let mut settings = Settings::default();
+    settings.ignored_processes.push("starship".into());
+    let policy = naming_policy(&settings);
+    let session_tab = tab("w1:t1", "w1", "[1] ai board", false);
+    let session = snapshot(vec![session_tab.clone()]);
+    let mut client = FakeClient::new(session.clone(), &[]);
+    client.processes.insert(
+        "w1:t1:pane".into(),
+        PaneProcessInfo {
+            foreground_process_group_id: Some(7),
+            foreground_processes: vec![
+                ProcessInfo {
+                    pid: 8,
+                    name: "starship".into(),
+                    argv0: Some("starship".into()),
+                    argv: None,
+                },
+                ProcessInfo {
+                    pid: 7,
+                    name: "zsh".into(),
+                    argv0: Some("zsh".into()),
+                    argv: None,
+                },
+            ],
+        },
+    );
+    let mut trace = crate::telemetry::CandidateRecord::default();
+
+    let name = computed_name_with_trace(
+        &mut client,
+        &session,
+        &session_tab,
+        &Invocation::Full,
+        &policy,
+        "zsh",
+        false,
+        Some(&mut trace),
+    )
+    .unwrap();
+
+    assert_eq!(name.as_deref(), Some("zsh"));
+    assert_eq!(
+        trace.representative_selection.as_deref(),
+        Some("shell_leader_fallback")
+    );
+    assert_eq!(trace.ignored_processes_skipped.len(), 1);
+    assert_eq!(
+        trace.ignored_processes_skipped[0].executable_basename,
+        "starship"
     );
 }
 
@@ -1111,6 +1236,7 @@ fn native_pane_close_refreshes_an_owned_split_without_focus_change() {
             last_rendered: "[1] ai board".into(),
         },
     );
+    set_pane_mapping(&directory, "w1:t1:closed", "w1:t1");
     let mut surviving = tab("w1:t1", "w1", "[1] ai board", false);
     surviving.pane_count = 1;
     let mut session = snapshot(vec![surviving]);
@@ -1134,6 +1260,143 @@ fn native_pane_close_refreshes_an_owned_split_without_focus_change() {
 }
 
 #[test]
+fn closed_pane_mapping_scopes_process_query_and_rename_to_one_tab() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: "ai board".into(),
+            last_rendered: "[1] ai board".into(),
+        },
+    );
+    set_pane_mapping(&directory, "w1:t1:closed", "w1:t1");
+    let session = snapshot(vec![
+        tab("w1:t1", "w1", "[1] ai board", false),
+        tab("w1:t2", "w1", "[2] other", false),
+    ]);
+    let mut client = FakeClient::new(session, &[("w1:t1:pane", "zsh")]);
+    let closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+
+    run_pass(&closed, &closed.invocation, &mut client).unwrap();
+
+    assert_eq!(client.process_queries, ["w1:t1:pane"]);
+    assert_eq!(client.renamed, [("w1:t1".into(), "[1] zsh".into())]);
+}
+
+#[test]
+fn missing_closed_pane_mapping_is_an_observable_no_op() {
+    let directory = TestDir::new();
+    let session = snapshot(vec![tab("w1:t1", "w1", "[1] ai board", false)]);
+    let mut client = FakeClient::new(session, &[("w1:t1:pane", "zsh")]);
+    let closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+    let mut record = DecisionRecord::from_config(&closed).unwrap();
+
+    run_pass_with_telemetry(&closed, &closed.invocation, &mut client, Some(&mut record)).unwrap();
+    record.finish(&Ok(()));
+
+    assert!(client.process_queries.is_empty());
+    assert!(client.renamed.is_empty());
+    assert_eq!(record.candidates.len(), 0);
+    assert_eq!(record.terminal_outcome, "pane_mapping_missing");
+    let mapping = record.pane_mapping.as_ref().unwrap();
+    assert_eq!(mapping.resolution, "missing");
+    assert_eq!(mapping.validation, "not_run");
+    assert!(!mapping.consumed);
+}
+
+#[test]
+fn mismatched_closed_pane_mapping_is_an_observable_no_op() {
+    let directory = TestDir::new();
+    set_pane_mapping(&directory, "w1:t1:closed", "w2:t2");
+    let session = snapshot(vec![
+        tab("w1:t1", "w1", "[1] ai board", false),
+        tab("w2:t2", "w2", "[1] other", false),
+    ]);
+    let mut client = FakeClient::new(session, &[]);
+    let closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+    let mut record = DecisionRecord::from_config(&closed).unwrap();
+
+    run_pass_with_telemetry(&closed, &closed.invocation, &mut client, Some(&mut record)).unwrap();
+    record.finish(&Ok(()));
+
+    assert!(client.process_queries.is_empty());
+    assert!(client.renamed.is_empty());
+    assert_eq!(record.terminal_outcome, "pane_mapping_invalid");
+    assert_eq!(
+        record.pane_mapping.as_ref().unwrap().validation,
+        "workspace_mismatch"
+    );
+}
+
+#[test]
+fn closed_pane_refresh_preserves_manual_ownership() {
+    let directory = TestDir::new();
+    set_ownership(&directory, TabOwnership::Manual);
+    set_pane_mapping(&directory, "w1:t1:closed", "w1:t1");
+    let session = snapshot(vec![tab("w1:t1", "w1", "[1] manual", false)]);
+    let mut client = FakeClient::new(session, &[("w1:t1:pane", "zsh")]);
+    let closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+
+    run_pass(&closed, &closed.invocation, &mut client).unwrap();
+
+    assert!(client.process_queries.is_empty());
+    assert!(client.renamed.is_empty());
+    assert_eq!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(&TabOwnership::Manual)
+    );
+}
+
+#[test]
+fn closed_pane_refresh_preserves_disabled_ownership() {
+    let directory = TestDir::new();
+    set_ownership(&directory, TabOwnership::AutomaticDisabled);
+    set_pane_mapping(&directory, "w1:t1:closed", "w1:t1");
+    let session = snapshot(vec![tab("w1:t1", "w1", "[1] disabled", false)]);
+    let mut client = FakeClient::new(session, &[("w1:t1:pane", "zsh")]);
+    let closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t1:closed".into(),
+        },
+    );
+
+    run_pass(&closed, &closed.invocation, &mut client).unwrap();
+
+    assert!(client.process_queries.is_empty());
+    assert!(client.renamed.is_empty());
+    assert_eq!(
+        State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(&TabOwnership::AutomaticDisabled)
+    );
+}
+
+#[test]
 fn close_telemetry_uses_the_decision_snapshot_and_process_observation() {
     let directory = TestDir::new();
     set_ownership(
@@ -1143,6 +1406,7 @@ fn close_telemetry_uses_the_decision_snapshot_and_process_observation() {
             last_rendered: "[1] ai board".into(),
         },
     );
+    set_pane_mapping(&directory, "w1:t1:closed", "w1:t1");
     let mut surviving = tab("w1:t1", "w1", "[1] ai board", false);
     surviving.pane_count = 1;
     let mut session = snapshot(vec![surviving]);
@@ -1164,6 +1428,15 @@ fn close_telemetry_uses_the_decision_snapshot_and_process_observation() {
     record.finish(&Ok(()));
 
     let candidate = &record.candidates[0];
+    let mapping = record.pane_mapping.as_ref().unwrap();
+    assert_eq!(mapping.mapped_tab_id.as_deref(), Some("w1:t1"));
+    assert_eq!(mapping.resolution, "resolved");
+    assert_eq!(mapping.validation, "valid");
+    assert!(mapping.consumed);
+    assert_eq!(
+        State::load(&directory.0).unwrap().pane_tab("w1:t1:closed"),
+        None
+    );
     assert_eq!(
         record.snapshot.as_ref().unwrap().closed_pane_present,
         Some(false)
@@ -1200,6 +1473,7 @@ fn guarded_tab_read_failure_keeps_the_real_candidate_trace_without_claiming_a_re
             last_rendered: "[1] ai board".into(),
         },
     );
+    set_pane_mapping(&directory, "w1:t1:closed", "w1:t1");
     let mut session = snapshot(vec![tab("w1:t1", "w1", "[1] ai board", false)]);
     session.panes[0].pane_id = "w1:t1:survivor".into();
     let mut client = FakeClient::new(session, &[("w1:t1:survivor", "zsh")]);
@@ -1254,6 +1528,7 @@ fn missing_tab_keeps_the_persisted_pending_rename_in_telemetry() {
             last_rendered: "[1] ai board".into(),
         },
     );
+    set_pane_mapping(&directory, "w1:t1:closed", "w1:t1");
     let mut session = snapshot(vec![tab("w1:t1", "w1", "[1] ai board", false)]);
     session.panes[0].pane_id = "w1:t1:survivor".into();
     let mut client = FakeClient::new(session, &[("w1:t1:survivor", "zsh")]);
@@ -1293,6 +1568,7 @@ fn tab_rename_failure_keeps_the_guard_observation_and_records_the_attempt() {
             last_rendered: "[1] ai board".into(),
         },
     );
+    set_pane_mapping(&directory, "w1:t1:closed", "w1:t1");
     let mut session = snapshot(vec![tab("w1:t1", "w1", "[1] ai board", false)]);
     session.panes[0].pane_id = "w1:t1:survivor".into();
     let mut client = FakeClient::new(session, &[("w1:t1:survivor", "zsh")]);

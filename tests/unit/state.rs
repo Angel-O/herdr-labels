@@ -88,6 +88,42 @@ fn all_fields_and_ownership_variants_round_trip() {
 }
 
 #[test]
+fn old_state_without_pane_index_remains_compatible() {
+    let root = TestDir::new();
+    fs::write(
+        root.child(STATE_FILE_NAME),
+        br#"{"version":1,"suspended":false,"tabs":{}}"#,
+    )
+    .unwrap();
+
+    let mut state = State::load(&root.0).unwrap();
+    assert_eq!(state.pane_tab("w1:p1"), None);
+    state.set_pane_tab("w1:p1", "w1:t1");
+    state.persist().unwrap();
+
+    assert_eq!(
+        State::load(&root.0).unwrap().pane_tab("w1:p1"),
+        Some("w1:t1")
+    );
+}
+
+#[test]
+fn pane_index_refreshes_current_membership_retains_absent_panes_and_prunes_absent_tabs() {
+    let root = TestDir::new();
+    let mut state = State::load(&root.0).unwrap();
+    state.set_pane_tab("closed", "live-tab");
+    state.set_pane_tab("stale", "gone-tab");
+
+    state.refresh_pane_tabs([("current", "live-tab")], ["live-tab"]);
+
+    assert_eq!(state.pane_tab("current"), Some("live-tab"));
+    assert_eq!(state.pane_tab("closed"), Some("live-tab"));
+    assert_eq!(state.pane_tab("stale"), None);
+    assert_eq!(state.remove_pane_tab("closed"), Some("live-tab".into()));
+    assert_eq!(state.pane_tab("closed"), None);
+}
+
+#[test]
 fn malformed_and_unsupported_state_fail_conservatively() {
     let root = TestDir::new();
     fs::write(root.child(STATE_FILE_NAME), b"not json").unwrap();
