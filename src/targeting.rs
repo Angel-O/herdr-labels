@@ -107,6 +107,8 @@ pub(super) struct ClosedPaneResolution {
     pub(super) resolution: &'static str,
     pub(super) validation: &'static str,
     pub(super) valid: bool,
+    /// A pane close can remove its one-pane tab without emitting `tab.closed`.
+    pub(super) closed_pane_was_tab_last_pane: bool,
     pub(super) outcome: &'static str,
 }
 
@@ -122,6 +124,7 @@ pub(super) fn resolve_closed_pane(
             resolution: "missing",
             validation: "not_run",
             valid: false,
+            closed_pane_was_tab_last_pane: false,
             outcome: "pane_mapping_missing",
         };
     };
@@ -135,6 +138,7 @@ pub(super) fn resolve_closed_pane(
             resolution: "resolved",
             validation: "tab_absent",
             valid: false,
+            closed_pane_was_tab_last_pane: true,
             outcome: "pane_mapping_invalid",
         };
     };
@@ -144,6 +148,7 @@ pub(super) fn resolve_closed_pane(
             resolution: "resolved",
             validation: "workspace_mismatch",
             valid: false,
+            closed_pane_was_tab_last_pane: false,
             outcome: "pane_mapping_invalid",
         };
     }
@@ -153,6 +158,7 @@ pub(super) fn resolve_closed_pane(
             resolution: "resolved",
             validation: "pane_still_present",
             valid: false,
+            closed_pane_was_tab_last_pane: false,
             outcome: "pane_mapping_invalid",
         };
     }
@@ -161,6 +167,7 @@ pub(super) fn resolve_closed_pane(
         resolution: "resolved",
         validation: "valid",
         valid: true,
+        closed_pane_was_tab_last_pane: false,
         outcome: "pane_mapping_consumed",
     }
 }

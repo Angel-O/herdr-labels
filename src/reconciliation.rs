@@ -81,6 +81,9 @@ pub(crate) fn run_pass(
         )),
         _ => None,
     };
+    let closed_pane_was_tab_last_pane = closed_resolution
+        .as_ref()
+        .is_some_and(|resolution| resolution.closed_pane_was_tab_last_pane);
     state.refresh_pane_tabs(
         snapshot
             .panes
@@ -98,13 +101,16 @@ pub(crate) fn run_pass(
             resolution.validation,
             resolution.valid,
         );
-        if !resolution.valid {
+        if !resolution.valid && !closed_pane_was_tab_last_pane {
             telemetry.record_snapshot(&snapshot, &[]);
             telemetry.set_terminal_outcome(resolution.outcome);
             state.persist()?;
             return Ok(());
         }
         state.remove_pane_tab(pane_id);
+        if closed_pane_was_tab_last_pane && let Some(tab_id) = resolution.mapped_tab_id.as_deref() {
+            state.remove_ownership(tab_id);
+        }
     }
     recover_pending(&snapshot, &mut state);
     if let Invocation::Toggle {
@@ -115,7 +121,22 @@ pub(crate) fn run_pass(
         toggle_ownership(&snapshot, &mut state, tab_id);
         state.persist()?;
     }
-    let targets = if let Some(resolution) = closed_resolution.as_ref() {
+    // Reuse the tab-close lifecycle path: it renumbers survivors from their
+    // existing labels without observing any survivor's process.
+    let reconciliation_invocation = if closed_pane_was_tab_last_pane {
+        let Invocation::ClosedPane { workspace_id, .. } = invocation else {
+            unreachable!("closed pane was the tab's last pane requires a closed-pane invocation");
+        };
+        Invocation::ClosedTab {
+            workspace_id: Some(workspace_id.clone()),
+            tab_id: None,
+        }
+    } else {
+        invocation.clone()
+    };
+    let targets = if closed_pane_was_tab_last_pane {
+        scoped_tabs(&snapshot, &reconciliation_invocation)
+    } else if let Some(resolution) = closed_resolution.as_ref() {
         scoped_closed_pane_tabs(&snapshot, invocation, resolution.mapped_tab_id.as_deref())
     } else {
         scoped_tabs(&snapshot, invocation)
@@ -137,10 +158,11 @@ pub(crate) fn run_pass(
             client,
             &snapshot,
             session_tab,
-            invocation,
+            &reconciliation_invocation,
             config,
             &mut state,
             &mut tab_telemetry,
+            !closed_pane_was_tab_last_pane,
         );
         telemetry.push_tab_decision(tab_telemetry);
         result?;
