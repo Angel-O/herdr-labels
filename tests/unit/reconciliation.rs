@@ -156,8 +156,12 @@ fn config(state_dir: &TestDir, invocation: Invocation) -> Config {
 }
 
 fn set_ownership(directory: &TestDir, ownership: TabOwnership) {
+    set_tab_ownership(directory, "w1:t1", ownership);
+}
+
+fn set_tab_ownership(directory: &TestDir, tab_id: &str, ownership: TabOwnership) {
     let mut state = State::load(&directory.0).unwrap();
-    state.set_ownership("w1:t1", ownership);
+    state.set_ownership(tab_id, ownership);
     state.persist().unwrap();
 }
 
@@ -165,6 +169,46 @@ fn set_pane_mapping(directory: &TestDir, pane_id: &str, tab_id: &str) {
     let mut state = State::load(&directory.0).unwrap();
     state.set_pane_tab(pane_id, tab_id);
     state.persist().unwrap();
+}
+
+#[test]
+fn closing_a_middle_one_pane_tab_renumbers_survivors_without_process_queries() {
+    let directory = TestDir::new();
+    for (tab_id, label, base) in [
+        ("w1:t1", "[1] opencode", "opencode"),
+        ("w1:t2", "[2] zsh", "zsh"),
+        ("w1:t3", "[3] zsh", "zsh"),
+    ] {
+        set_tab_ownership(
+            &directory,
+            tab_id,
+            TabOwnership::Owned {
+                last_base: base.into(),
+                last_rendered: label.into(),
+            },
+        );
+    }
+    set_pane_mapping(&directory, "w1:t2:closed", "w1:t2");
+    let session = snapshot(vec![
+        tab("w1:t1", "w1", "[1] opencode", false),
+        tab("w1:t3", "w1", "[3] zsh", false),
+    ]);
+    let mut client = FakeClient::new(session, &[]);
+    let closed = config(
+        &directory,
+        Invocation::ClosedPane {
+            workspace_id: "w1".into(),
+            pane_id: "w1:t2:closed".into(),
+        },
+    );
+
+    run_pass(&closed, &closed.invocation, &mut client).unwrap();
+
+    assert!(client.process_queries.is_empty());
+    assert_eq!(client.renamed, [("w1:t3".into(), "[2] zsh".into())]);
+    let state = State::load(&directory.0).unwrap();
+    assert_eq!(state.ownership("w1:t2"), None);
+    assert_eq!(state.pane_tab("w1:t2:closed"), None);
 }
 
 #[test]

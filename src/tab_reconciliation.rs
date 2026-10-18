@@ -14,6 +14,7 @@ use crate::telemetry::TabTelemetry;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn reconcile_tab(
     client: &mut impl TabClient,
     snapshot: &SessionSnapshot,
@@ -22,6 +23,7 @@ pub(super) fn reconcile_tab(
     config: &Config,
     state: &mut State,
     telemetry: &mut TabTelemetry,
+    allow_process_observation: bool,
 ) -> Result<()> {
     let position = tab_positions(snapshot)[&session_tab.tab.tab_id];
     let settings = &config.settings;
@@ -107,19 +109,21 @@ pub(super) fn reconcile_tab(
             Some(TabOwnership::Owned { last_rendered, .. })
         ) if tab_id == &tab.tab_id && last_rendered == &tab.label
     );
-    let observes_process = matches!(
-        invocation,
-        Invocation::Tab { .. }
-            | Invocation::ClosedPane { .. }
-            | Invocation::Init { .. }
-            | Invocation::Preexec { .. }
-            | Invocation::Precmd { .. }
-            | Invocation::Reset { .. }
-            | Invocation::Toggle { .. }
-    ) || renamed_to_whitespace;
+    let observes_process = allow_process_observation
+        && (matches!(
+            invocation,
+            Invocation::Tab { .. }
+                | Invocation::ClosedPane { .. }
+                | Invocation::Init { .. }
+                | Invocation::Preexec { .. }
+                | Invocation::Precmd { .. }
+                | Invocation::Reset { .. }
+                | Invocation::Toggle { .. }
+        ) || renamed_to_whitespace);
     let computed_base = if settings.auto_name_tabs
         && eligible
-        && (observes_process || matches!(ownership, Some(TabOwnership::ResetPending)))
+        && (observes_process
+            || (allow_process_observation && matches!(ownership, Some(TabOwnership::ResetPending))))
         && !own_rename_event
     {
         computed_name(
