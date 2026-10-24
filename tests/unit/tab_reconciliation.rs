@@ -111,7 +111,6 @@ fn ignored_preexec_uses_the_hook_shell_not_the_login_shell() {
             &invocation,
             &policy,
             "zsh",
-            None,
             &mut telemetry,
         )
         .unwrap(),
@@ -137,7 +136,6 @@ fn ambient_ignored_program_does_not_guess_the_active_shell() {
             &Invocation::Full,
             &policy,
             "zsh",
-            None,
             &mut telemetry,
         )
         .unwrap(),
@@ -163,7 +161,6 @@ fn unchanged_owned_label_preserves_a_naming_rejection_outcome() {
             &Invocation::Full,
             &policy,
             "zsh",
-            None,
             &mut telemetry,
         )
         .unwrap(),
@@ -220,7 +217,6 @@ fn ignored_selection_is_recorded_only_when_trace_is_enabled() {
         &Invocation::Full,
         &policy,
         "zsh",
-        None,
         &mut telemetry,
     )
     .unwrap();

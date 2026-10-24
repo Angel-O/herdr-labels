@@ -126,10 +126,6 @@ pub(super) fn reconcile_tab(
             || (allow_process_observation && matches!(ownership, Some(TabOwnership::ResetPending))))
         && !own_rename_event
     {
-        let event_pane_id = match invocation {
-            Invocation::Tab { pane_id, .. } => pane_id.as_deref(),
-            _ => None,
-        };
         computed_name(
             client,
             snapshot,
@@ -137,7 +133,6 @@ pub(super) fn reconcile_tab(
             invocation,
             &policy,
             &fallback_shell,
-            event_pane_id,
             telemetry,
         )?
     } else {
@@ -245,9 +240,12 @@ pub(super) fn computed_name(
     invocation: &Invocation,
     policy: &NamingPolicy,
     fallback_shell: &str,
-    event_pane_id: Option<&str>,
     telemetry: &mut TabTelemetry,
 ) -> Result<Option<String>> {
+    let event_pane_id = match invocation {
+        Invocation::Tab { pane_id, .. } => pane_id.as_deref(),
+        _ => None,
+    };
     match invocation {
         Invocation::Preexec {
             pane_id,
