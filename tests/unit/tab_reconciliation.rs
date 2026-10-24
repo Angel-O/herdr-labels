@@ -71,6 +71,7 @@ fn snapshot(tab: SessionTab) -> SessionSnapshot {
         panes: vec![PaneInfo {
             pane_id: "w1:t1:pane".into(),
             tab_id: "w1:t1".into(),
+            label: None,
             agent: None,
         }],
     }
@@ -140,6 +141,31 @@ fn ambient_ignored_program_does_not_guess_the_active_shell() {
         )
         .unwrap(),
         None
+    );
+}
+
+#[test]
+fn blank_pane_label_falls_back_to_process_naming() {
+    let session_tab = tab();
+    let mut session = snapshot(session_tab.clone());
+    session.panes[0].label = Some(" \t ".into());
+    let mut client = FakeClient {
+        processes: HashMap::from([("w1:t1:pane".into(), process_info("zsh"))]),
+    };
+    let mut telemetry = TabTelemetry::Off;
+
+    assert_eq!(
+        computed_name(
+            &mut client,
+            &session,
+            &session_tab,
+            &Invocation::Full,
+            &policy(&Settings::default()),
+            "zsh",
+            &mut telemetry,
+        )
+        .unwrap(),
+        Some("zsh".into())
     );
 }
 

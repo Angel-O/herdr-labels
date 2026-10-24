@@ -20,6 +20,7 @@ fn snapshot(tabs: Vec<SessionTab>) -> SessionSnapshot {
         .map(|tab| PaneInfo {
             pane_id: format!("{}:pane", tab.tab.tab_id),
             tab_id: tab.tab.tab_id.clone(),
+            label: None,
             agent: None,
         })
         .collect();
@@ -50,6 +51,7 @@ fn pane_selection_is_conservative_for_background_splits() {
     session.panes.push(PaneInfo {
         pane_id: "other".into(),
         tab_id: "w1:t1".into(),
+        label: None,
         agent: None,
     });
     assert_eq!(naming_pane(&session, &split, None), None);
@@ -66,6 +68,7 @@ fn pane_focus_selection_rejects_a_pane_from_another_tab() {
     session.panes.push(PaneInfo {
         pane_id: "other-tab-pane".into(),
         tab_id: "w1:t2".into(),
+        label: None,
         agent: None,
     });
 
