@@ -242,6 +242,10 @@ pub(super) fn computed_name(
     fallback_shell: &str,
     telemetry: &mut TabTelemetry,
 ) -> Result<Option<String>> {
+    let event_pane_id = match invocation {
+        Invocation::Tab { pane_id, .. } => pane_id.as_deref(),
+        _ => None,
+    };
     match invocation {
         Invocation::Preexec {
             pane_id,
@@ -316,8 +320,10 @@ pub(super) fn computed_name(
             Ok(Some(policy.label(shell, None).unwrap_or_default()))
         }
         _ => {
-            let Some(pane_id) = naming_pane(snapshot, tab) else {
-                telemetry.reject(if tab.pane_count > 1 {
+            let Some(pane_id) = naming_pane(snapshot, tab, event_pane_id) else {
+                telemetry.reject(if event_pane_id.is_some() {
+                    "event_pane_not_in_tab"
+                } else if tab.pane_count > 1 {
                     "background_multi_pane"
                 } else {
                     "no_naming_pane"

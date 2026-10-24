@@ -364,6 +364,7 @@ pub(crate) fn telemetry_from_invocation(config: &Config, invocation: &Invocation
     let workspace_id = invocation_workspace(invocation);
     let event_pane_id = match invocation {
         Invocation::ClosedPane { pane_id, .. } => Some(pane_id.clone()),
+        Invocation::Tab { pane_id, .. } => pane_id.clone().or_else(|| config.event_pane_id.clone()),
         _ => config.event_pane_id.clone(),
     };
     let event_tab_id = invocation_tab(invocation);

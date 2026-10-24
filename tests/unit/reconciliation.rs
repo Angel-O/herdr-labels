@@ -914,27 +914,90 @@ fn focusing_a_pane_updates_an_owned_tab_from_the_active_pane() {
     );
     let mut split = tab("w1:t1", "w1", "[1] nvim", true);
     split.pane_count = 2;
-    let mut session = snapshot(vec![split]);
+    let other = tab("w1:t2", "w1", "[2] zsh", false);
+    let mut session = snapshot(vec![split, other]);
     session.panes.push(PaneInfo {
         pane_id: "w1:t1:other".into(),
         tab_id: "w1:t1".into(),
         agent: None,
     });
-    session.focused_pane_id = Some("w1:t1:other".into());
-    let mut client = FakeClient::new(session, &[("w1:t1:pane", "nvim"), ("w1:t1:other", "cargo")]);
+    session.focused_pane_id = Some("w1:t2:pane".into());
+    let mut client = FakeClient::new(
+        session,
+        &[
+            ("w1:t1:pane", "nvim"),
+            ("w1:t1:other", "cargo"),
+            ("w1:t2:pane", "zsh"),
+        ],
+    );
     let focused = config(
         &directory,
         Invocation::Tab {
             workspace_id: "w1".into(),
             tab_id: "w1:t1".into(),
+            pane_id: Some("w1:t1:other".into()),
         },
     );
+    let focused = Config {
+        event: Some("pane.focused".into()),
+        event_tab_id: Some("w1:t1".into()),
+        event_pane_id: Some("w1:t1:other".into()),
+        ..focused
+    };
     run_pass(&focused, &focused.invocation, &mut client).unwrap();
     assert_eq!(client.renamed, [("w1:t1".into(), "[1] cargo".into())]);
     assert!(matches!(
         State::load(&directory.0).unwrap().ownership("w1:t1"),
         Some(TabOwnership::Owned { last_base, .. }) if last_base == "cargo"
     ));
+}
+
+#[test]
+fn mismatched_pane_focus_does_not_rename_the_event_tab() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: "nvim".into(),
+            last_rendered: "[1] nvim".into(),
+        },
+    );
+    let mut split = tab("w1:t1", "w1", "[1] nvim", true);
+    split.pane_count = 2;
+    let other = tab("w1:t2", "w1", "[2] zsh", false);
+    let mut session = snapshot(vec![split, other]);
+    session.panes.push(PaneInfo {
+        pane_id: "w1:t1:other".into(),
+        tab_id: "w1:t1".into(),
+        agent: None,
+    });
+    session.focused_pane_id = Some("w1:t2:pane".into());
+    let mut client = FakeClient::new(
+        session,
+        &[
+            ("w1:t1:pane", "nvim"),
+            ("w1:t1:other", "cargo"),
+            ("w1:t2:pane", "zsh"),
+        ],
+    );
+    let focused = Config {
+        event: Some("pane.focused".into()),
+        event_tab_id: Some("w1:t1".into()),
+        event_pane_id: Some("w1:t2:pane".into()),
+        ..config(
+            &directory,
+            Invocation::Tab {
+                workspace_id: "w1".into(),
+                tab_id: "w1:t1".into(),
+                pane_id: Some("w1:t2:pane".into()),
+            },
+        )
+    };
+
+    run_pass(&focused, &focused.invocation, &mut client).unwrap();
+
+    assert!(client.renamed.is_empty());
+    assert!(client.process_queries.is_empty());
 }
 
 #[test]
@@ -1345,6 +1408,7 @@ fn exiting_a_focused_pane_updates_an_owned_tab_from_the_survivor() {
         Invocation::Tab {
             workspace_id: "w1".into(),
             tab_id: "w1:t1".into(),
+            pane_id: None,
         },
     );
 

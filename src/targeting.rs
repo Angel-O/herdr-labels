@@ -6,11 +6,26 @@ use crate::config::Invocation;
 use crate::herdr::{SessionSnapshot, SessionTab};
 use crate::state::State;
 
-pub(super) fn naming_pane<'a>(snapshot: &'a SessionSnapshot, tab: &SessionTab) -> Option<&'a str> {
+/// Selects the pane whose process should name `tab`.
+///
+/// A pane-focus event supplies the authoritative pane for that refresh. The
+/// pane must be a member of the target tab; otherwise the event is ignored
+/// instead of falling back to unrelated session-global focus.
+pub(super) fn naming_pane<'a>(
+    snapshot: &'a SessionSnapshot,
+    tab: &SessionTab,
+    event_pane_id: Option<&str>,
+) -> Option<&'a str> {
     let panes = snapshot
         .panes
         .iter()
         .filter(|pane| pane.tab_id == tab.tab.tab_id);
+    if let Some(event_pane_id) = event_pane_id {
+        return panes
+            .filter(|pane| pane.pane_id == event_pane_id)
+            .map(|pane| pane.pane_id.as_str())
+            .next();
+    }
     if tab.pane_count == 1 {
         return panes.map(|pane| pane.pane_id.as_str()).next();
     }
@@ -47,6 +62,7 @@ pub(super) fn scoped_tabs<'a>(
         Invocation::Tab {
             workspace_id,
             tab_id,
+            ..
         }
         | Invocation::RenamedTab {
             workspace_id,

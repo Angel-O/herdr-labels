@@ -38,6 +38,9 @@ pub(crate) enum Invocation {
     Tab {
         workspace_id: String,
         tab_id: String,
+        /// Pane supplied by a `pane.focused` event, when available.
+        #[serde(default)]
+        pane_id: Option<String>,
     },
     /// Reconciles a pane-closed event by workspace; the closed pane has no surviving tab ID.
     ClosedPane {
@@ -245,6 +248,7 @@ fn event_invocation(
             (Some(workspace_id), Some(tab_id)) => Invocation::Tab {
                 workspace_id,
                 tab_id,
+                pane_id: (event == Some("pane.focused")).then_some(pane_id).flatten(),
             },
             (Some(workspace_id), None) => Invocation::Workspace(workspace_id),
             _ => Invocation::Full,

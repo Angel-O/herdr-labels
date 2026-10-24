@@ -396,6 +396,7 @@ fn invocation_classes_have_distinct_bounded_lock_policies() {
     let focus = Invocation::Tab {
         workspace_id: "w1".into(),
         tab_id: "w1:t1".into(),
+        pane_id: None,
     };
     let action = Invocation::Clear;
 
@@ -458,6 +459,7 @@ fn contended_focus_refresh_is_not_downgraded_to_a_generic_rerun() {
         Invocation::Tab {
             workspace_id: "w1".into(),
             tab_id: "w1:t1".into(),
+            pane_id: None,
         },
     );
     let started = Instant::now();
