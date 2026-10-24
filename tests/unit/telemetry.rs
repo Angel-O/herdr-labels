@@ -38,6 +38,7 @@ fn snapshot() -> SessionSnapshot {
         panes: vec![PaneInfo {
             pane_id: "w1:t1:survivor".into(),
             tab_id: "w1:t1".into(),
+            label: None,
             agent: None,
         }],
     }

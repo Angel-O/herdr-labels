@@ -246,6 +246,32 @@ pub(super) fn computed_name(
         Invocation::Tab { pane_id, .. } => pane_id.as_deref(),
         _ => None,
     };
+    let selected_pane_id = match invocation {
+        Invocation::Init { pane_id, .. }
+        | Invocation::Preexec { pane_id, .. }
+        | Invocation::Precmd { pane_id, .. }
+            if pane_targets_tab(snapshot, pane_id, &tab.tab.tab_id) =>
+        {
+            Some(pane_id.as_str())
+        }
+        _ => naming_pane(snapshot, tab, event_pane_id),
+    };
+    // Herdr 0.9.5 emits no pane-label rename event, and `pane.updated` is not
+    // a plugin hook; labels therefore refresh on focus until upstream support
+    // exists (https://github.com/herdrdev/herdr/discussions/4912,
+    // https://github.com/herdrdev/herdr/discussions/5008).
+    if let Some((pane_id, label)) = selected_pane_id.and_then(|pane_id| {
+        snapshot
+            .panes
+            .iter()
+            .find(|pane| pane.pane_id == pane_id)
+            .and_then(|pane| pane.label.as_deref())
+            .filter(|label| !label.trim().is_empty())
+            .map(|label| (pane_id, label))
+    }) {
+        telemetry.record_naming_pane(pane_id, "pane_label");
+        return Ok(Some(label.to_owned()));
+    }
     match invocation {
         Invocation::Preexec {
             pane_id,

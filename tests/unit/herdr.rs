@@ -58,7 +58,7 @@ fn requests_and_parses_a_session_snapshot() {
                         "focused": true, "pane_count": 1
                     }],
                     "panes": [{
-                        "pane_id": "w1:p1", "tab_id": "w1:t1", "agent": "opencode"
+                        "pane_id": "w1:p1", "tab_id": "w1:t1", "label": "left", "agent": "opencode"
                     }]
                 }
             }
@@ -71,6 +71,7 @@ fn requests_and_parses_a_session_snapshot() {
     assert_eq!(snapshot.focused_pane_id.as_deref(), Some("w1:p1"));
     assert_eq!(snapshot.tabs[0].tab.label, "1");
     assert_eq!(snapshot.panes[0].pane_id, "w1:p1");
+    assert_eq!(snapshot.panes[0].label.as_deref(), Some("left"));
     assert_eq!(snapshot.panes[0].agent.as_deref(), Some("opencode"));
     server.join().unwrap();
     std::fs::remove_file(socket_path).unwrap();
@@ -115,4 +116,15 @@ fn requests_and_parses_foreground_process_information() {
     assert_eq!(process_info.leader().unwrap().program(), "/usr/bin/nvim");
     server.join().unwrap();
     std::fs::remove_file(socket_path).unwrap();
+}
+
+#[test]
+fn older_snapshots_without_pane_labels_remain_compatible() {
+    let pane: PaneInfo = serde_json::from_value(json!({
+        "pane_id": "w1:p1",
+        "tab_id": "w1:t1"
+    }))
+    .unwrap();
+
+    assert_eq!(pane.label, None);
 }

@@ -111,8 +111,14 @@ When loaded, the hook immediately submits a PID-verified shell name. It enables
 process-verified `preexec` and PID-verified `precmd` updates follow commands and
 prompts. Herdr focus and pane events never establish the first semantic name.
 After adoption, focus events refresh the owned semantic name from the active
-pane. Other lifecycle events preserve the owned semantic name and update
-numbering only; shell hooks provide semantic process changes while commands run.
+pane. Pane-label changes are reflected when that pane is focused; immediate
+refresh on rename is not currently available because Herdr 0.9.5 emits no
+pane-label rename event and does not expose `pane.updated` as a plugin hook.
+Other lifecycle events preserve the owned semantic name and update numbering
+only; shell hooks provide semantic process changes while commands run. See
+[Herdr discussions #4912](https://github.com/herdrdev/herdr/discussions/4912)
+and [#5008](https://github.com/herdrdev/herdr/discussions/5008); the terminal
+title discussion alone does not provide the missing pane-label event.
 When Bash already has a `DEBUG` trap and exposes no `preexec_functions` hook
 array, Herdr Labels preserves that trap and provides prompt-time updates only.
 
@@ -281,6 +287,40 @@ source /absolute/path/to/herdr-labels/shell/hook.zsh
 ```
 
 Restart the Herdr server to run the startup reconciliation.
+
+### Validate a local build before release
+
+Use a fresh named Herdr session and isolated config; do not link the checkout
+into a normal session. Start Herdr with a temporary `HOME`, `XDG_CONFIG_HOME`,
+and `HERDR_CONFIG_PATH`, and clear inherited `HERDR_ENV`, `HERDR_SESSION`,
+`HERDR_SOCKET_PATH`, `HERDR_PANE_ID`, `HERDR_TAB_ID`, `HERDR_WORKSPACE_ID`, and
+`HERDR_BIN_PATH` so the CLI cannot target the caller's session. Keep the
+isolated session socket path within the platform's Unix-socket length limit.
+
+In that environment, run:
+
+```bash
+cargo build --release --locked
+herdr plugin link "$PWD"
+herdr plugin list --plugin angel-o.labels --json
+shasum -a 256 target/release/herdr-labels
+```
+
+Confirm the plugin list reports `source.kind: local` and
+`plugin_root: "$PWD"`. Configure the isolated Herdr session's new Zsh panes to
+source `shell/hook.zsh`, with `HERDR_LABELS_BIN` set to the absolute path of
+`target/release/herdr-labels`; use a fresh shell for each pane. Record that
+`$_HERDR_LABELS_ZSH_BIN` resolves to that same path. The hook uses this binary
+for its synchronous `init` and asynchronous `preexec`/`precmd` calls.
+
+Create a fresh split with two idle Zsh panes, set their pane labels to `left`
+and `right`, then focus each pane repeatedly using Herdr's pane-focus command.
+Record each pane label and visible tab title after every focus event. Also
+verify a blank pane label retains process-derived naming, manually rename the
+tab and confirm focus no longer changes it, then invoke the existing `reset`
+action and confirm automatic naming resumes. Keep the binary hash, local plugin
+registration, shell binary path, labels, and observed titles as the validation
+record. Unlink the plugin and delete the named test session when finished.
 
 ## Development
 
