@@ -72,6 +72,7 @@ fn deferred_close_record_uses_the_consumed_request_context() {
         Invocation::Tab {
             workspace_id: "holder".into(),
             tab_id: "holder:t1".into(),
+            pane_id: None,
         },
         Some("tab.focused"),
     );
@@ -95,6 +96,7 @@ fn focus_control_record_is_distinct_and_parseable() {
     let invocation = Invocation::Tab {
         workspace_id: "w1".into(),
         tab_id: "w1:t1".into(),
+        pane_id: None,
     };
     let config = config(invocation, Some("tab.focused"));
     let mut telemetry = crate::runner::telemetry_from_config(&config);
@@ -113,6 +115,7 @@ fn tab_decisions_keep_the_external_candidates_field_name() {
     let invocation = Invocation::Tab {
         workspace_id: "w1".into(),
         tab_id: "w1:t1".into(),
+        pane_id: None,
     };
     let config = config(invocation, Some("tab.focused"));
     let mut telemetry = crate::runner::telemetry_from_config(&config);

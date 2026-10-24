@@ -52,11 +52,24 @@ fn pane_selection_is_conservative_for_background_splits() {
         tab_id: "w1:t1".into(),
         agent: None,
     });
-    assert_eq!(naming_pane(&session, &split), None);
+    assert_eq!(naming_pane(&session, &split, None), None);
 
     split.focused = true;
     session.focused_pane_id = Some("other".into());
-    assert_eq!(naming_pane(&session, &split), Some("other"));
+    assert_eq!(naming_pane(&session, &split, None), Some("other"));
+}
+
+#[test]
+fn pane_focus_selection_rejects_a_pane_from_another_tab() {
+    let split = tab("w1:t1", "w1", "1", true);
+    let mut session = snapshot(vec![split.clone(), tab("w1:t2", "w1", "2", false)]);
+    session.panes.push(PaneInfo {
+        pane_id: "other-tab-pane".into(),
+        tab_id: "w1:t2".into(),
+        agent: None,
+    });
+
+    assert_eq!(naming_pane(&session, &split, Some("other-tab-pane")), None);
 }
 
 #[test]

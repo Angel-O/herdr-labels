@@ -104,7 +104,21 @@ fn close_and_focus_events_have_precise_invocations() {
         ),
         Invocation::Tab {
             workspace_id: "w1".into(),
-            tab_id: "w1:t2".into()
+            tab_id: "w1:t2".into(),
+            pane_id: None,
+        }
+    );
+    assert_eq!(
+        event_invocation(
+            Some("pane.focused"),
+            Some("w1".into()),
+            Some("w1:t2".into()),
+            Some("w1:t2:p3".into()),
+        ),
+        Invocation::Tab {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t2".into(),
+            pane_id: Some("w1:t2:p3".into()),
         }
     );
     assert_eq!(
@@ -128,7 +142,8 @@ fn close_and_focus_events_have_precise_invocations() {
         ),
         Invocation::Tab {
             workspace_id: "w1".into(),
-            tab_id: "w1:t2".into()
+            tab_id: "w1:t2".into(),
+            pane_id: None,
         }
     );
 }

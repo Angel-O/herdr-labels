@@ -126,6 +126,10 @@ pub(super) fn reconcile_tab(
             || (allow_process_observation && matches!(ownership, Some(TabOwnership::ResetPending))))
         && !own_rename_event
     {
+        let event_pane_id = match invocation {
+            Invocation::Tab { pane_id, .. } => pane_id.as_deref(),
+            _ => None,
+        };
         computed_name(
             client,
             snapshot,
@@ -133,6 +137,7 @@ pub(super) fn reconcile_tab(
             invocation,
             &policy,
             &fallback_shell,
+            event_pane_id,
             telemetry,
         )?
     } else {
@@ -240,6 +245,7 @@ pub(super) fn computed_name(
     invocation: &Invocation,
     policy: &NamingPolicy,
     fallback_shell: &str,
+    event_pane_id: Option<&str>,
     telemetry: &mut TabTelemetry,
 ) -> Result<Option<String>> {
     match invocation {
@@ -316,8 +322,10 @@ pub(super) fn computed_name(
             Ok(Some(policy.label(shell, None).unwrap_or_default()))
         }
         _ => {
-            let Some(pane_id) = naming_pane(snapshot, tab) else {
-                telemetry.reject(if tab.pane_count > 1 {
+            let Some(pane_id) = naming_pane(snapshot, tab, event_pane_id) else {
+                telemetry.reject(if event_pane_id.is_some() {
+                    "event_pane_not_in_tab"
+                } else if tab.pane_count > 1 {
                     "background_multi_pane"
                 } else {
                     "no_naming_pane"
