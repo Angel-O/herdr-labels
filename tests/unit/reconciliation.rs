@@ -953,6 +953,23 @@ fn focusing_a_pane_updates_an_owned_tab_from_the_active_pane() {
         State::load(&directory.0).unwrap().ownership("w1:t1"),
         Some(TabOwnership::Owned { last_base, .. }) if last_base == "right"
     ));
+
+    client.snapshot.tabs[0].tab.label = "[1] right".into();
+    let focused_unnamed = Config {
+        event: Some("pane.focused".into()),
+        event_tab_id: Some("w1:t1".into()),
+        event_pane_id: Some("w1:t1:pane".into()),
+        ..config(
+            &directory,
+            Invocation::Tab {
+                workspace_id: "w1".into(),
+                tab_id: "w1:t1".into(),
+                pane_id: Some("w1:t1:pane".into()),
+            },
+        )
+    };
+    run_pass(&focused_unnamed, &focused_unnamed.invocation, &mut client).unwrap();
+    assert_eq!(client.renamed.last().unwrap().1, "[1] nvim");
 }
 
 #[test]
@@ -1019,6 +1036,7 @@ fn native_pane_close_refreshes_an_owned_split_without_focus_change() {
     surviving.pane_count = 1;
     let mut session = snapshot(vec![surviving]);
     session.panes[0].pane_id = "w1:t1:survivor".into();
+    session.panes[0].label = Some("survivor label".into());
     let mut client = FakeClient::new(session, &[("w1:t1:survivor", "zsh")]);
     let closed = config(
         &directory,
@@ -1035,6 +1053,63 @@ fn native_pane_close_refreshes_an_owned_split_without_focus_change() {
         State::load(&directory.0).unwrap().ownership("w1:t1"),
         Some(TabOwnership::Owned { last_base, .. }) if last_base == "zsh"
     ));
+
+    client.snapshot.tabs[0].tab.label = "[1] zsh".into();
+    client
+        .processes
+        .insert("w1:t1:survivor".into(), process_info("nvim"));
+    let preexec = config(
+        &directory,
+        Invocation::Preexec {
+            pane_id: "w1:t1:survivor".into(),
+            shell: "zsh".into(),
+            program: Some("nvim".into()),
+        },
+    );
+    run_pass(&preexec, &preexec.invocation, &mut client).unwrap();
+    assert_eq!(client.renamed.last().unwrap().1, "[1] nvim");
+
+    client.snapshot.tabs[0].tab.label = "[1] nvim".into();
+    client
+        .processes
+        .insert("w1:t1:survivor".into(), process_info("zsh"));
+    let precmd = config(
+        &directory,
+        Invocation::Precmd {
+            pane_id: "w1:t1:survivor".into(),
+            shell: "zsh".into(),
+            shell_pid: 7,
+        },
+    );
+    run_pass(&precmd, &precmd.invocation, &mut client).unwrap();
+    assert_eq!(client.renamed.last().unwrap().1, "[1] zsh");
+}
+
+#[test]
+fn never_split_named_single_pane_uses_process_naming() {
+    let directory = TestDir::new();
+    set_ownership(
+        &directory,
+        TabOwnership::Owned {
+            last_base: "old process".into(),
+            last_rendered: "[1] old process".into(),
+        },
+    );
+    let mut session = snapshot(vec![tab("w1:t1", "w1", "[1] old process", true)]);
+    session.panes[0].label = Some("pane label".into());
+    let mut client = FakeClient::new(session, &[("w1:t1:pane", "nvim")]);
+    let init = config(
+        &directory,
+        Invocation::Preexec {
+            pane_id: "w1:t1:pane".into(),
+            shell: "zsh".into(),
+            program: Some("nvim".into()),
+        },
+    );
+
+    run_pass(&init, &init.invocation, &mut client).unwrap();
+
+    assert_eq!(client.renamed, [("w1:t1".into(), "[1] nvim".into())]);
 }
 
 #[test]
@@ -1406,6 +1481,7 @@ fn exiting_a_focused_pane_updates_an_owned_tab_from_the_survivor() {
     surviving.pane_count = 1;
     let mut session = snapshot(vec![surviving]);
     session.panes[0].pane_id = "w1:t1:survivor".into();
+    session.panes[0].label = Some("survivor label".into());
     let mut client = FakeClient::new(session, &[("w1:t1:survivor", "cargo")]);
     let exited = config(
         &directory,
