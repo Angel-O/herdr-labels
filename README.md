@@ -114,6 +114,11 @@ After adoption, focus events refresh the owned semantic name from the active
 pane. Pane-label changes are reflected when that pane is focused; immediate
 refresh on rename is not currently available because Herdr 0.9.5 emits no
 pane-label rename event and does not expose `pane.updated` as a plugin hook.
+In a multi-pane tab, the selected pane's non-blank label takes precedence over
+its process name. A single-pane tab instead follows its foreground process,
+even when that pane has a label; this also restores process naming when a split
+tab collapses to its last pane. Command and prompt changes continue to update
+the tab through the shell hooks.
 Other lifecycle events preserve the owned semantic name and update numbering
 only; shell hooks provide semantic process changes while commands run. See
 [Herdr discussions #4912](https://github.com/herdrdev/herdr/discussions/4912)

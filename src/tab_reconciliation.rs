@@ -260,15 +260,20 @@ pub(super) fn computed_name(
     // a plugin hook; labels therefore refresh on focus until upstream support
     // exists (https://github.com/herdrdev/herdr/discussions/4912,
     // https://github.com/herdrdev/herdr/discussions/5008).
-    if let Some((pane_id, label)) = selected_pane_id.and_then(|pane_id| {
-        snapshot
-            .panes
-            .iter()
-            .find(|pane| pane.pane_id == pane_id)
-            .and_then(|pane| pane.label.as_deref())
-            .filter(|label| !label.trim().is_empty())
-            .map(|label| (pane_id, label))
-    }) {
+    let pane_label = if tab.pane_count > 1 {
+        selected_pane_id.and_then(|pane_id| {
+            snapshot
+                .panes
+                .iter()
+                .find(|pane| pane.pane_id == pane_id)
+                .and_then(|pane| pane.label.as_deref())
+                .filter(|label| !label.trim().is_empty())
+                .map(|label| (pane_id, label))
+        })
+    } else {
+        None
+    };
+    if let Some((pane_id, label)) = pane_label {
         telemetry.record_naming_pane(pane_id, "pane_label");
         return Ok(Some(label.to_owned()));
     }
