@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
-use crate::herdr::{PaneProcessInfo, SessionSnapshot};
+use crate::herdr::{PaneInfo, PaneProcessInfo, SessionSnapshot, SessionTab};
 use crate::numbering::Tab;
 use crate::settings::Settings;
+use crate::state::{State, TabOwnership};
 
 static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
@@ -35,8 +36,11 @@ struct FakeClient {
     tab_reads: usize,
     snapshots: usize,
     rerun_on_first_snapshot: Option<PathBuf>,
+    rerun_invocation_on_first_snapshot: Option<Invocation>,
     rerun_on_every_snapshot: Option<PathBuf>,
     invalid_rerun_on_first_snapshot: Option<PathBuf>,
+    snapshot_data: Option<SessionSnapshot>,
+    renamed: Vec<(String, String)>,
 }
 
 struct ProcessClient {
@@ -57,8 +61,11 @@ impl FakeClient {
             tab_reads: 0,
             snapshots: 0,
             rerun_on_first_snapshot: None,
+            rerun_invocation_on_first_snapshot: None,
             rerun_on_every_snapshot: None,
             invalid_rerun_on_first_snapshot: None,
+            snapshot_data: None,
+            renamed: Vec::new(),
         }
     }
 }
@@ -69,7 +76,11 @@ impl TabClient for FakeClient {
         if self.snapshots == 1
             && let Some(state_dir) = &self.rerun_on_first_snapshot
         {
-            ReconciliationLock::request_rerun(state_dir, &Invocation::Full)?;
+            let invocation = self
+                .rerun_invocation_on_first_snapshot
+                .clone()
+                .unwrap_or(Invocation::Full);
+            ReconciliationLock::request_rerun(state_dir, &invocation)?;
         }
         if let Some(state_dir) = &self.rerun_on_every_snapshot {
             ReconciliationLock::request_rerun(state_dir, &Invocation::Full)?;
@@ -81,11 +92,11 @@ impl TabClient for FakeClient {
             std::fs::create_dir_all(&reruns)?;
             std::fs::write(reruns.join("invalid.json"), b"{")?;
         }
-        Ok(SessionSnapshot {
+        Ok(self.snapshot_data.clone().unwrap_or(SessionSnapshot {
             focused_pane_id: None,
             tabs: Vec::new(),
             panes: Vec::new(),
-        })
+        }))
     }
 
     fn get_tab(&mut self, _tab_id: &str) -> Result<Option<Tab>> {
@@ -96,12 +107,22 @@ impl TabClient for FakeClient {
             .unwrap_or_else(|| self.fallback_tab.clone()))
     }
 
-    fn rename_tab(&mut self, _tab_id: &str, _label: &str) -> Result<()> {
+    fn rename_tab(&mut self, tab_id: &str, label: &str) -> Result<()> {
+        self.record_rename(tab_id, label);
         Ok(())
     }
 
     fn pane_process_info(&mut self, _pane_id: &str) -> Result<PaneProcessInfo> {
         unreachable!()
+    }
+}
+
+impl FakeClient {
+    fn record_rename(&mut self, tab_id: &str, label: &str) {
+        self.renamed.push((tab_id.into(), label.into()));
+        if let Some(tab) = &mut self.fallback_tab {
+            tab.label = label.into();
+        }
     }
 }
 
@@ -287,6 +308,76 @@ fn coalescing_consumes_a_rerun_requested_during_the_first_pass() {
     assert_eq!(client.snapshots, 2);
     assert_eq!(remaining_passes, MAX_RECONCILIATION_PASSES - 2);
     assert!(!ReconciliationLock::rerun_requested(&directory.0).unwrap());
+}
+
+#[test]
+fn queued_external_rename_keeps_its_target_and_numbers_on_the_deferred_pass() {
+    let directory = TestDir::new();
+    let mut state = State::load(&directory.0).unwrap();
+    state.set_ownership(
+        "w2:t4",
+        TabOwnership::Owned {
+            last_base: "zsh".into(),
+            last_rendered: "[4] zsh".into(),
+        },
+    );
+    state.persist().unwrap();
+
+    let mut client = FakeClient::with_tab(Some(Tab {
+        tab_id: "w2:t4".into(),
+        workspace_id: "w2".into(),
+        label: "BIL-123".into(),
+    }));
+    client.rerun_on_first_snapshot = Some(directory.0.clone());
+    client.rerun_invocation_on_first_snapshot = Some(Invocation::RenamedTab {
+        workspace_id: "w2".into(),
+        tab_id: "w2:t4".into(),
+    });
+    client.snapshot_data = Some(SessionSnapshot {
+        focused_pane_id: None,
+        tabs: (1..=4)
+            .map(|position| SessionTab {
+                tab: Tab {
+                    tab_id: format!("w2:t{position}"),
+                    workspace_id: "w2".into(),
+                    label: if position == 4 {
+                        "BIL-123".into()
+                    } else {
+                        format!("[{position}] other")
+                    },
+                },
+                focused: false,
+                pane_count: 1,
+            })
+            .collect(),
+        panes: (1..=4)
+            .map(|position| PaneInfo {
+                pane_id: format!("w2:t{position}:pane"),
+                tab_id: format!("w2:t{position}"),
+                label: None,
+                agent: None,
+            })
+            .collect(),
+    });
+    let config = config(&directory, Invocation::Full);
+    let mut remaining_passes = MAX_RECONCILIATION_PASSES;
+    let mut telemetry = Telemetry::Off;
+
+    run_coalesced_passes(
+        &config,
+        &Invocation::Full,
+        &mut client,
+        &mut remaining_passes,
+        &mut telemetry,
+    )
+    .unwrap();
+
+    assert_eq!(client.snapshots, 2);
+    assert_eq!(client.renamed, [("w2:t4".into(), "[4] BIL-123".into())]);
+    assert_eq!(
+        State::load(&directory.0).unwrap().ownership("w2:t4"),
+        Some(&TabOwnership::Manual)
+    );
 }
 
 #[test]

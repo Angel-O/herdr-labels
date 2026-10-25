@@ -63,7 +63,7 @@ impl ReconciliationLock {
             };
             let result = (|| {
                 let requested = match invocation {
-                    Invocation::ClosedPane { .. } => invocation,
+                    Invocation::ClosedPane { .. } | Invocation::RenamedTab { .. } => invocation,
                     _ => &Invocation::Full,
                 };
                 serde_json::to_writer(&mut file, requested).map_err(io::Error::other)?;
