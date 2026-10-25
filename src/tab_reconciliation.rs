@@ -31,7 +31,7 @@ pub(super) fn reconcile_tab(
     let fallback_shell = fallback_shell();
     let tab = &session_tab.tab;
     let current_base = strip_numeric_prefix(&tab.label);
-    let ownership = state.ownership(&tab.tab_id).cloned();
+    let mut ownership = state.ownership(&tab.tab_id).cloned();
     let renamed_to_whitespace = !tab.label.is_empty()
         && tab.label.trim().is_empty()
         && matches!(
@@ -70,10 +70,13 @@ pub(super) fn reconcile_tab(
         }) if current_base != last_base || &tab.label != last_rendered
     ) {
         state.set_ownership(&tab.tab_id, TabOwnership::Manual);
-        telemetry.set_eligible(false, Some("manual_rename"));
-        telemetry.set_outcome("ownership_blocked");
-        telemetry.set_ownership_after(state, &tab.tab_id);
-        return Ok(());
+        ownership = Some(TabOwnership::Manual);
+        if !matches!(invocation, Invocation::RenamedTab { tab_id, .. } if tab_id == &tab.tab_id) {
+            telemetry.set_eligible(false, Some("manual_rename"));
+            telemetry.set_outcome("ownership_blocked");
+            telemetry.set_ownership_after(state, &tab.tab_id);
+            return Ok(());
+        }
     }
     let eligible = if forced {
         true

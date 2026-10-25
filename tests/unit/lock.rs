@@ -75,6 +75,23 @@ fn rerun_marker_preserves_a_closed_pane_request_scope() {
 }
 
 #[test]
+fn rerun_marker_preserves_an_external_tab_rename_target() {
+    let state_dir = test_state_dir();
+    let renamed = Invocation::RenamedTab {
+        workspace_id: "w2".into(),
+        tab_id: "w2:t4".into(),
+    };
+
+    ReconciliationLock::request_rerun(&state_dir, &renamed).unwrap();
+
+    assert_eq!(
+        ReconciliationLock::take_rerun(&state_dir).unwrap(),
+        Some(renamed)
+    );
+    std::fs::remove_dir_all(state_dir).unwrap();
+}
+
+#[test]
 fn close_followed_by_full_keeps_both_requests_in_order() {
     let state_dir = test_state_dir();
     let closed = Invocation::ClosedPane {

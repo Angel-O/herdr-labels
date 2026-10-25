@@ -303,7 +303,7 @@ fn manual_rename_after_eager_startup_is_preserved() {
         },
     );
     let mut client = FakeClient::new(
-        snapshot(vec![tab("w1:t1", "w1", "custom", false)]),
+        snapshot(vec![tab("w1:t1", "w1", "BIL-123", false)]),
         &[("w1:t1:pane", "locale")],
     );
     let renamed = config(
@@ -316,9 +316,80 @@ fn manual_rename_after_eager_startup_is_preserved() {
 
     run_pass(&renamed, &renamed.invocation, &mut client).unwrap();
 
-    assert!(client.renamed.is_empty());
+    assert_eq!(client.renamed, [("w1:t1".into(), "[1] BIL-123".into())]);
     assert_eq!(
         State::load(&directory.0).unwrap().ownership("w1:t1"),
+        Some(&TabOwnership::Manual)
+    );
+}
+
+#[test]
+fn first_manual_rename_is_numbered_by_workspace_position_and_then_stays_manual() {
+    let directory = TestDir::new();
+    let mut client = FakeClient::new(
+        snapshot(vec![
+            tab("w1:t1", "w1", "[1] other", false),
+            tab("w2:t1", "w2", "[1] other", false),
+            tab("w2:t2", "w2", "[2] other", false),
+            tab("w2:t3", "w2", "[3] other", false),
+            tab("w2:t4", "w2", "BIL-123", false),
+        ]),
+        &[],
+    );
+    set_tab_ownership(
+        &directory,
+        "w2:t4",
+        TabOwnership::Owned {
+            last_base: "zsh".into(),
+            last_rendered: "[4] zsh".into(),
+        },
+    );
+    let renamed = config(
+        &directory,
+        Invocation::RenamedTab {
+            workspace_id: "w2".into(),
+            tab_id: "w2:t4".into(),
+        },
+    );
+
+    run_pass(&renamed, &renamed.invocation, &mut client).unwrap();
+    assert_eq!(client.renamed, [("w2:t4".into(), "[4] BIL-123".into())]);
+    assert_eq!(
+        State::load(&directory.0).unwrap().ownership("w2:t4"),
+        Some(&TabOwnership::Manual)
+    );
+
+    client.snapshot.tabs[4].tab.label = "[4] BIL-123".into();
+    client
+        .current
+        .insert("w2:t4".into(), client.snapshot.tabs[4].tab.clone());
+    run_pass(&renamed, &renamed.invocation, &mut client).unwrap();
+    assert_eq!(
+        client.renamed.len(),
+        1,
+        "generated rename event must be idempotent"
+    );
+
+    client.snapshot.tabs.swap(2, 4);
+    client.snapshot.tabs[2].tab.label = "[4] BIL-123".into();
+    client.snapshot.tabs[4].tab.label = "[3] other".into();
+    client
+        .current
+        .insert("w2:t4".into(), client.snapshot.tabs[2].tab.clone());
+    let moved = config(
+        &directory,
+        Invocation::RenamedTab {
+            workspace_id: "w2".into(),
+            tab_id: "w2:t4".into(),
+        },
+    );
+    run_pass(&moved, &moved.invocation, &mut client).unwrap();
+    assert_eq!(
+        client.renamed.last().unwrap(),
+        &("w2:t4".into(), "[2] BIL-123".into())
+    );
+    assert_eq!(
+        State::load(&directory.0).unwrap().ownership("w2:t4"),
         Some(&TabOwnership::Manual)
     );
 }
@@ -348,7 +419,11 @@ fn same_base_manual_renames_transfer_ownership() {
 
         run_pass(&renamed, &renamed.invocation, &mut client).unwrap();
 
-        assert!(client.renamed.is_empty(), "unexpected rename for {label}");
+        assert_eq!(
+            client.renamed,
+            [("w1:t1".into(), "[1] zsh".into())],
+            "manual base should be immediately numbered for {label}"
+        );
         assert_eq!(
             State::load(&directory.0).unwrap().ownership("w1:t1"),
             Some(&TabOwnership::Manual),
