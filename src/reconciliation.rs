@@ -121,20 +121,29 @@ pub(crate) fn run_pass(
         toggle_ownership(&snapshot, &mut state, tab_id);
         state.persist()?;
     }
+    // A tab whose last pane exits disappears with only `pane.exited`, never
+    // `tab.closed`; its event then targets a tab absent from the snapshot.
+    let vanished_tab_workspace = match invocation {
+        Invocation::ClosedPane { workspace_id, .. } if closed_pane_was_tab_last_pane => {
+            Some(workspace_id)
+        }
+        Invocation::Tab {
+            workspace_id,
+            tab_id,
+            ..
+        } if !snapshot.tabs.iter().any(|tab| tab.tab.tab_id == *tab_id) => Some(workspace_id),
+        _ => None,
+    };
     // Reuse the tab-close lifecycle path: it renumbers survivors from their
     // existing labels without observing any survivor's process.
-    let reconciliation_invocation = if closed_pane_was_tab_last_pane {
-        let Invocation::ClosedPane { workspace_id, .. } = invocation else {
-            unreachable!("closed pane was the tab's last pane requires a closed-pane invocation");
-        };
-        Invocation::ClosedTab {
+    let reconciliation_invocation = match vanished_tab_workspace {
+        Some(workspace_id) => Invocation::ClosedTab {
             workspace_id: Some(workspace_id.clone()),
             tab_id: None,
-        }
-    } else {
-        invocation.clone()
+        },
+        None => invocation.clone(),
     };
-    let targets = if closed_pane_was_tab_last_pane {
+    let targets = if vanished_tab_workspace.is_some() {
         scoped_tabs(&snapshot, &reconciliation_invocation)
     } else if let Some(resolution) = closed_resolution.as_ref() {
         scoped_closed_pane_tabs(&snapshot, invocation, resolution.mapped_tab_id.as_deref())
@@ -162,7 +171,7 @@ pub(crate) fn run_pass(
             config,
             &mut state,
             &mut tab_telemetry,
-            !closed_pane_was_tab_last_pane,
+            vanished_tab_workspace.is_none(),
         );
         telemetry.push_tab_decision(tab_telemetry);
         result?;
