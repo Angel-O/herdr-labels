@@ -213,6 +213,30 @@ fn closing_a_middle_one_pane_tab_renumbers_survivors_without_process_queries() {
 }
 
 #[test]
+fn exiting_the_last_pane_of_a_middle_tab_renumbers_survivors() {
+    let directory = TestDir::new();
+    set_tab_ownership(&directory, "w1:t3", TabOwnership::ResetPending);
+    let session = snapshot(vec![
+        tab("w1:t1", "w1", "[1] api", false),
+        tab("w1:t3", "w1", "[3] web", false),
+    ]);
+    let mut client = FakeClient::new(session, &[("w1:t3:pane", "zsh")]);
+    let exited = config(
+        &directory,
+        Invocation::Tab {
+            workspace_id: "w1".into(),
+            tab_id: "w1:t2".into(),
+            pane_id: None,
+        },
+    );
+
+    run_pass(&exited, &exited.invocation, &mut client).unwrap();
+
+    assert!(client.process_queries.is_empty());
+    assert_eq!(client.renamed, [("w1:t3".into(), "[2] web".into())]);
+}
+
+#[test]
 fn unowned_placeholder_waits_for_authoritative_shell_hook() {
     let directory = TestDir::new();
     let mut client = FakeClient::new(
